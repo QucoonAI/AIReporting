@@ -18,6 +18,7 @@ if url.query.get("sslmode") == "require":
     connect_args = {"ssl": ssl_context}
     query = dict(url.query)
     query.pop("sslmode", None)
+    query.pop("channel_binding", None)
     url = url._replace(query=query)
 else:
     connect_args = {}

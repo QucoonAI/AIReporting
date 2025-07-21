@@ -1,11 +1,12 @@
 from functools import lru_cache
-from typing import Optional
-from pydantic import EmailStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    SECRET_KEY: str
     DATABASE_URL: str = None
+    REDIS_URL: str = None
+    SENDGRID_AUTH_KEY: str = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

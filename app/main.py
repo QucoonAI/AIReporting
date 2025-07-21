@@ -3,17 +3,30 @@ from sqlalchemy import text
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-# from config.database import SessionDep
-from config.utils import logger
+from config.database import SessionDep
+from config.redis import redis_manager
+from core.utils import logger
+from routes import auth, user
 
 
 def create_application(lifespan=None):
     application = FastAPI(lifespan=lifespan)
+    application.include_router(user.router)
+    application.include_router(auth.router)
     return application
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handle application startup and shutdown"""
+    # Startup Redis
+    await redis_manager.connect()
+    print("🚀 Application started successfully")
+    yield
+    # Shutdown Redis
+    await redis_manager.disconnect()
+    print("👋 Application shutdown complete")
 
-
-app = create_application()
+app = create_application(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,17 +62,17 @@ async def health_check():
     """Health check endpoint"""
     return {"message": "Healthy"}
 
-# @app.get(
-#     "/health-check/database",
-#     status_code=status.HTTP_200_OK,
-#     summary="Health check (Database)",
-#     description="Check if the database service is healthy",
-#     # include_in_schema=False  # Hide from OpenAPI docs
-# )
-# async def database_health_check(session: SessionDep): # type: ignore
-#     """Health check endpoint"""
-#     try:
-#         await session.exec(statement=text("SELECT 1"))
-#         return {"status": "healthy", "db": "connected"}
-#     except Exception as exc:
-#         return {"status": "unhealthy", "error": str(exc)}
+@app.get(
+    "/health-check/database",
+    status_code=status.HTTP_200_OK,
+    summary="Health check (Database)",
+    description="Check if the database service is healthy",
+    # include_in_schema=False  # Hide from OpenAPI docs
+)
+async def database_health_check(session: SessionDep): # type: ignore
+    """Health check endpoint"""
+    try:
+        await session.exec(statement=text("SELECT 1"))
+        return {"status": "healthy", "db": "connected"}
+    except Exception as exc:
+        return {"status": "unhealthy", "error": str(exc)}
