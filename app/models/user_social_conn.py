@@ -19,4 +19,4 @@ class UserSocialConnection(SQLModel, table=True):
     social_updated_at: Optional[datetime] = Field(sa_column_kwargs={"server_default": func.now(), "onupdate": func.now()})
 
     # Relationships
-    social_user: User = Relationship(back_populates="social_account")
+    social_user: User = Relationship(back_populates="social_accounts")

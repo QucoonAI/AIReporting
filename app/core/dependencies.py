@@ -7,7 +7,10 @@ from config.settings import get_settings
 from services.redis import AsyncRedisService
 from services.email import EmailService
 from services.user import UserService
+from services.data_source import DataSourceService
 from repositories.user import UserRepository
+from repositories.data_source import DataSourceRepository
+
 
 security = HTTPBearer()
 settings = get_settings()
@@ -15,6 +18,10 @@ settings = get_settings()
 
 def get_user_repo(db_session: SessionDep = SessionDep) -> UserRepository:  # type: ignore
     return UserRepository(db_session=db_session)
+
+def get_data_source_repo(db_session: SessionDep = SessionDep) -> DataSourceRepository:  # type: ignore
+    """Dependency to get DataSourceRepository instance"""
+    return DataSourceRepository(db_session)
 
 def get_redis_service() -> AsyncRedisService:
     return AsyncRedisService(redis_client=redis_manager.get_client())
@@ -32,6 +39,13 @@ def get_user_service(
         redis_service=redis_service,
         email_service=email_service
     )
+
+def get_data_source_service(
+    data_source_repo: DataSourceRepository = Depends(get_data_source_repo)
+) -> DataSourceService:
+    """Dependency to get DataSourceService instance"""
+    return DataSourceService(data_source_repo)
+
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),

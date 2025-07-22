@@ -14,6 +14,7 @@ from schemas.user import (
 from core.dependencies import get_current_user, get_user_service, get_user_repo
 from core.utils import logger
 
+
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
 

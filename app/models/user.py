@@ -21,4 +21,5 @@ class User(SQLModel, table=True):
     
     # Relationships
     user_profile: "UserProfile" = Relationship(back_populates="profile_user", cascade_delete=True)
-    social_account: List["UserSocialConnection"] = Relationship(back_populates="social_user", cascade_delete=True)
+    social_accounts: List["UserSocialConnection"] = Relationship(back_populates="social_user", cascade_delete=True)
+    data_sources: List["DataSource"] = Relationship(back_populates="data_source_owner", cascade_delete=True)

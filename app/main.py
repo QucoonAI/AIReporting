@@ -6,13 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from config.database import SessionDep
 from config.redis import redis_manager
 from core.utils import logger
-from routes import auth, user
+from routes import auth, user, data_source
 
 
 def create_application(lifespan=None):
     application = FastAPI(lifespan=lifespan)
     application.include_router(user.router)
     application.include_router(auth.router)
+    application.include_router(data_source.router)
     return application
 
 @asynccontextmanager

@@ -17,3 +17,16 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.41",
     "sqlmodel>=0.0.24",
 ]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.9.2",
+    "factory-boy>=3.3.3",
+    "faker>=37.4.2",
+    "httpx>=0.28.1",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
+    "pytest-cov>=6.2.1",
+    "pytest-mock>=3.14.1",
+    "pytest-xdist>=3.8.0",
+]
