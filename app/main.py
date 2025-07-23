@@ -1,11 +1,8 @@
 from contextlib import asynccontextmanager
-from sqlalchemy import text
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
-from config.database import SessionDep
 from config.redis import redis_manager
-from core.utils import logger
+from core.exceptions import setup_exception_handling
 from routes import auth, user, data_source
 
 
@@ -29,6 +26,8 @@ async def lifespan(app: FastAPI):
 
 app = create_application(lifespan=lifespan)
 
+setup_exception_handling(app)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,21 +35,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    """Custom HTTP exception handler for better error responses."""
-    logger.error(f"Unhandled exception on {request.method} {request.url}.")
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "error": {
-                "code": exc.status_code,
-                "message": exc.detail,
-                "type": "http_error"
-            }
-        }
-    )
 
 @app.get(
     "/health-check",
@@ -63,17 +47,20 @@ async def health_check():
     """Health check endpoint"""
     return {"message": "Healthy"}
 
-@app.get(
-    "/health-check/database",
-    status_code=status.HTTP_200_OK,
-    summary="Health check (Database)",
-    description="Check if the database service is healthy",
-    # include_in_schema=False  # Hide from OpenAPI docs
-)
-async def database_health_check(session: SessionDep): # type: ignore
-    """Health check endpoint"""
-    try:
-        await session.exec(statement=text("SELECT 1"))
-        return {"status": "healthy", "db": "connected"}
-    except Exception as exc:
-        return {"status": "unhealthy", "error": str(exc)}
+
+if __name__ == "__main__":
+    import uvicorn
+
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,  # Remove in production
+        log_level="info"
+    )

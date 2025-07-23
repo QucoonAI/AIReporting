@@ -4,6 +4,12 @@ from sqlmodel import select
 from fastapi import HTTPException, status, BackgroundTasks, Request
 from passlib.context import CryptContext
 from models import User, UserProfile
+from core.exceptions import (
+    UserNotFoundError,
+    InvalidOTPError,
+    RateLimitExceededError
+)
+from core.utils import logger
 from config.database import SessionDep
 from services.redis import AsyncRedisService
 from services.email import (
@@ -23,7 +29,6 @@ class UserService:
         self.session: SessionDep = db_session # type: ignore
         self.redis: AsyncRedisService = redis_service
         self.email_service: EmailService = email_service
-        self.pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
         self.otp_expiry_minutes = 30
         self.max_otp_attempts = 5  # Maximum OTP attempts per hour
         
@@ -33,15 +38,15 @@ class UserService:
     
     def _verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """Verify a password against its hash."""
-        return self.pwd_context.verify(plain_password, hashed_password)
+        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        return pwd_context.verify(plain_password, hashed_password)
     
     async def _check_otp_rate_limit(self, email: str, otp_type: str) -> None:
         """Check if user has exceeded OTP request rate limit."""
         attempts = await self.redis.get_otp_attempts(email, otp_type)
         if attempts >= self.max_otp_attempts:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Too many {otp_type} attempts. Please try again later."
+            raise RateLimitExceededError(
+                f"Too many {otp_type} attempts. Please try again later."
             )
     
     def _send_otp_email(self, background_tasks: BackgroundTasks, user: User, otp: str, otp_type: str) -> None:
@@ -124,136 +129,149 @@ class UserService:
 
     async def verify_user(self, request: VerifyUserRequest, background_tasks: BackgroundTasks) -> str:
         """Send verification OTP to user."""
-        statement = (select(User).where(User.user_email == request.user_email))
-        result = await self.session.exec(statement)
-        user = result.first()
+        try:
+            statement = (select(User).where(User.user_email == request.user_email))
+            result = await self.session.exec(statement)
+            user = result.first()
+            
+            if not user:
+                raise UserNotFoundError(request.user_email)
+            
+            if user.user_is_verified:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="User is already verified"
+                )
+            
+            # Check rate limit - will raise RateLimitExceededError if exceeded
+            await self._check_otp_rate_limit(request.user_email, "email_verification")
+            
+            # Generate and send verification OTP
+            otp = await self.redis.generate_otp()
+            otp_key = f"email_verification:{request.user_email}"
+            
+            await self.redis.store_otp(otp_key, user.user_id, otp, self.otp_expiry_minutes)
+            await self.redis.increment_otp_attempts(request.user_email, "email_verification")
+            self._send_otp_email(background_tasks, user, otp, "email_verification")
+            
+            return "Verification OTP sent successfully"
         
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-        
-        if user.user_is_verified:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User is already verified"
-            )
-        
-        # Check rate limit
-        await self._check_otp_rate_limit(request.user_email, "email_verification")
-        
-        # Generate and send verification OTP
-        otp = await self.redis.generate_otp()
-        otp_key = f"email_verification:{request.user_email}"
-        
-        await self.redis.store_otp(otp_key, user.user_id, otp, self.otp_expiry_minutes)
-        await self.redis.increment_otp_attempts(request.user_email, "email_verification")
-        self._send_otp_email(background_tasks, user, otp, "email_verification")
-        
-        return "Verification OTP sent successfully"
+        except (UserNotFoundError, RateLimitExceededError, HTTPException):
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error sending verification to {request.user_email}: {e}")
+            raise
 
     async def verify_user_confirm(self, request: VerifyUserConfirmRequest) -> str:
-        """Confirm user email verification with OTP."""
-        otp_key = f"email_verification:{request.user_email}"
-        
-        token_data = await self.redis.verify_otp(otp_key, request.otp)
-        if not token_data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid or expired OTP"
-            )
-        
-        user = await self.session.get(User, token_data["user_id"])
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-        
-        # Update user verification status
-        user.user_is_verified = True
-        user.user_is_active = True
+        try:
+            """Confirm user email verification with OTP."""
+            otp_key = f"email_verification:{request.user_email}"
+            
+            token_data = await self.redis.verify_otp(otp_key, request.otp)
+            if not token_data:
+                raise InvalidOTPError("Invalid or expired OTP")
+            
+            user = await self.session.get(User, token_data["user_id"])
+            if not user:
+                raise UserNotFoundError(token_data["user_id"])
+            
+            # Update user verification status
+            user.user_is_verified = True
+            user.user_is_active = True
 
-        self.session.add(user)
-        await self.session.commit()
+            self.session.add(user)
+            await self.session.commit()
+            
+            # Clean up OTP and reset attempts
+            await self.redis.delete_otp(otp_key)
+            await self.redis.reset_otp_attempts(request.user_email, "email_verification")
+            
+            return "Email verified successfully"
         
-        # Clean up OTP and reset attempts
-        await self.redis.delete_otp(otp_key)
-        await self.redis.reset_otp_attempts(request.user_email, "email_verification")
-        
-        return "Email verified successfully"
+        except (InvalidOTPError, UserNotFoundError):
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error confirming verification for {request.user_email}: {e}")
+            raise
 
     async def update_user(self, user_id: int, update_data: UserUpdateRequest) -> User:
         """Update user information."""
-        user = await self.session.get(User, user_id)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-        
-        if not user.user_is_active:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User account is deactivated"
-            )
-        
-        # Update user fields
-        if update_data.user_first_name is not None:
-            user.user_first_name = update_data.user_first_name
-        if update_data.user_last_name is not None:
-            user.user_last_name = update_data.user_last_name
-        
-        self.session.add(user)
-        
-        # Update user profile if provided
-        if update_data.user_profile is not None:
-            statement = (select(UserProfile).where(UserProfile.user_profile_user_id == user_id))
-            result = await self.session.exec(statement)
-            profile = result.first()
+        try:
+            user = await self.session.get(User, user_id)
+            if not user:
+                raise UserNotFoundError(user_id)
             
-            if not profile:
-                # Create new profile if it doesn't exist
-                profile = UserProfile(user_profile_user_id=user_id)
+            if not user.user_is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="User account is deactivated"
+                )
+            
+            # Update user fields
+            if update_data.user_first_name is not None:
+                user.user_first_name = update_data.user_first_name
+            if update_data.user_last_name is not None:
+                user.user_last_name = update_data.user_last_name
+            
+            self.session.add(user)
+            
+            # Update user profile if provided
+            if update_data.user_profile is not None:
+                statement = (select(UserProfile).where(UserProfile.user_profile_user_id == user_id))
+                result = await self.session.exec(statement)
+                profile = result.first()
+                
+                if not profile:
+                    # Create new profile if it doesn't exist
+                    profile = UserProfile(user_profile_user_id=user_id)
+                    self.session.add(profile)
+                
+                # Update profile fields
+                if update_data.user_profile.user_profile_bio is not None:
+                    profile.user_profile_bio = update_data.user_profile.user_profile_bio
+                if update_data.user_profile.user_profile_avatar is not None:
+                    profile.user_profile_avatar = update_data.user_profile.user_profile_avatar
+                if update_data.user_profile.user_phone_number is not None:
+                    profile.user_phone_number = update_data.user_profile.user_phone_number
+                
                 self.session.add(profile)
             
-            # Update profile fields
-            if update_data.user_profile.user_profile_bio is not None:
-                profile.user_profile_bio = update_data.user_profile.user_profile_bio
-            if update_data.user_profile.user_profile_avatar is not None:
-                profile.user_profile_avatar = update_data.user_profile.user_profile_avatar
-            if update_data.user_profile.user_phone_number is not None:
-                profile.user_phone_number = update_data.user_profile.user_phone_number
+            await self.session.commit()
+            await self.session.refresh(user)
             
-            self.session.add(profile)
+            return user
         
-        await self.session.commit()
-        await self.session.refresh(user)
-        
-        return user
+        except (UserNotFoundError, HTTPException):
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error updating user {user_id}: {e}")
+            raise
 
     async def delete_user(self, user_id: int) -> str:
         """Soft delete a user (deactivate account)."""
-        user = await self.session.get(User, user_id)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
+        try:
+            user = await self.session.get(User, user_id)
+            if not user:
+                raise UserNotFoundError(user_id)
+            
+            if not user.user_is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="User account is already deactivated"
+                )
+            
+            # Soft delete - set is_active to False
+            user.user_is_active = False
+            self.session.add(user)
+            await self.session.commit()
+            
+            return "User account deactivated successfully"
         
-        if not user.user_is_active:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User account is already deactivated"
-            )
-        
-        # Soft delete - set is_active to False
-        user.user_is_active = False
-        self.session.add(user)
-        await self.session.commit()
-        
-        return "User account deactivated successfully"
+        except (UserNotFoundError, HTTPException):
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error deleting user {user_id}: {e}")
+            raise
 
     async def change_password(self, user_id: int, request: ChangePasswordRequest, background_tasks: BackgroundTasks) -> str:
         """Initiate password change process."""
@@ -404,23 +422,28 @@ class UserService:
 
     async def authenticate_user(self, email: str, password: str) -> Optional[User]:
         """Authenticate user with email and password."""
-        statement = select(User).where(User.user_email == email)
-        result = await self.session.exec(statement)
-        user = result.first()
+        try:
+            statement = select(User).where(User.user_email == email)
+            result = await self.session.exec(statement)
+            user = result.first()
+            
+            if not user:
+                return None
+            
+            if not user.user_is_active:
+                return None
+            
+            if not user.user_is_verified:
+                return None
+            
+            if not self._verify_password(password, user.user_password):
+                return None
+            
+            return user
         
-        if not user:
+        except Exception as e:
+            logger.error(f"Unexpected error during authentication: {e}")
             return None
-        
-        if not user.user_is_active:
-            return None
-        
-        if not user.user_is_verified:
-            return None
-        
-        if not self._verify_password(password, user.user_password):
-            return None
-        
-        return user
     
     async def login_user(self, login_data: LoginRequest, request: Request) -> Dict[str, Any]:
         """Login user and create session."""
