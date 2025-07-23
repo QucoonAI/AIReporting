@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 from config.redis import redis_manager
+from config.dynamodb import initialize_dynamodb_tables
 from core.exceptions import setup_exception_handling
 from routes import auth, user, data_source
 
@@ -16,6 +17,10 @@ def create_application(lifespan=None):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle application startup and shutdown"""
+    
+    # Initialize DynamoDB tables on startup
+    initialize_dynamodb_tables()
+
     # Startup Redis
     await redis_manager.connect()
     print("🚀 Application started successfully")

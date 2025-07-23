@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     REDIS_URL: str
     SENDGRID_AUTH_KEY: str
+    AWS_REGION: str
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -11,3 +11,12 @@ class DataSourceType(str, Enum):
     MSSQL = "mssql"
     ORACLE = "oracle"
     MONGODB = "mongodb"
+
+class MessageRole(str, Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+class ChatSessionStatus(str, Enum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+    DELETED = "deleted"
