@@ -27,7 +27,6 @@ class Message(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000, description="Message content")
-    role: MessageRole = Field(default=MessageRole.USER, description="Message role")
 
 
 class MessageEdit(BaseModel):

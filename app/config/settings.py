@@ -7,7 +7,10 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     REDIS_URL: str
     SENDGRID_AUTH_KEY: str
-    AWS_REGION: str
+    AWS_ACCESS_KEY_ID: str
+    AWS_SECRET_ACCESS_KEY: str
+    AWS_ACCOUNT_ID: str
+    AWS_REGION: str = "us-east-1"
 
     model_config = SettingsConfigDict(
         env_file=".env",
