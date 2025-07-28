@@ -8,8 +8,11 @@ from services.redis import AsyncRedisService
 from services.email import EmailService
 from services.user import UserService
 from services.data_source import DataSourceService
+from services.chat import ChatService
+from services.llm import MockLLMService
 from repositories.user import UserRepository
 from repositories.data_source import DataSourceRepository
+from repositories.chat import ChatRepository
 
 
 security = HTTPBearer()
@@ -22,6 +25,10 @@ def get_user_repo(db_session: SessionDep = SessionDep) -> UserRepository:  # typ
 def get_data_source_repo(db_session: SessionDep = SessionDep) -> DataSourceRepository:  # type: ignore
     """Dependency to get DataSourceRepository instance"""
     return DataSourceRepository(db_session)
+
+def get_chat_repo() -> ChatRepository:
+    """Dependency to get ChatRepository instance"""
+    return ChatRepository()
 
 def get_redis_service() -> AsyncRedisService:
     return AsyncRedisService(redis_client=redis_manager.get_client())
@@ -46,6 +53,17 @@ def get_data_source_service(
     """Dependency to get DataSourceService instance"""
     return DataSourceService(data_source_repo)
 
+def get_llm_service() -> MockLLMService:
+    """Dependency to get MockLLMService instance"""
+    return MockLLMService()
+
+def get_chat_service(
+    chat_repo: ChatRepository = Depends(get_chat_repo),
+    data_source_repo: DataSourceRepository = Depends(get_data_source_repo),
+    llm_service: MockLLMService = Depends(get_llm_service)
+) -> ChatService:
+    """Dependency to get ChatService instance"""
+    return ChatService(chat_repo, data_source_repo, llm_service)
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),

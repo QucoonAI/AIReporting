@@ -1,5 +1,5 @@
 from . import *
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 from sqlmodel import SQLModel, Field, Relationship
 from sqlalchemy import func, UniqueConstraint
@@ -22,3 +22,5 @@ class DataSource(SQLModel, table=True):
 
     # Relationships
     data_source_owner: User = Relationship(back_populates="data_sources")
+    data_source_chats: List["Chat"] = Relationship(back_populates="chat_data_source", cascade_delete=True)
+

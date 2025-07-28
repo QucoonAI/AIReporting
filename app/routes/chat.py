@@ -1,0 +1,499 @@
+from fastapi import APIRouter, Depends, Query, HTTPException, status, Path
+from typing import Optional, Dict, Any
+from services.chat import ChatService
+from schemas.chat import (
+    ChatSessionCreateRequest, ChatSessionCreateResponse, ChatSessionUpdateRequest,
+    ChatSessionUpdateResponse, ChatSessionDeleteResponse, ChatSessionListResponse,
+    ChatSessionDetailResponse, ChatMessageRequest, ChatMessageResponse,
+    EditMessageRequest, EditMessageResponse, ChatSessionResponse,
+    ChatSessionPaginatedListResponse, PaginationMetadata,
+    MessageResponse, MessageRole
+)
+from core.dependencies import get_current_user, get_chat_service
+from core.utils import logger
+
+
+router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
+
+
+@router.post(
+    "/sessions",
+    response_model=ChatSessionCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new chat session",
+    description="Create a new chat session associated with a data source."
+)
+async def create_chat_session(
+    session_data: ChatSessionCreateRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    chat_service: ChatService = Depends(get_chat_service)
+) -> ChatSessionCreateResponse:
+    """
+    Create a new chat session.
+    
+    - **title**: Session title
+    - **data_source_id**: ID of the associated data source (must belong to user)
+    
+    Returns the created chat session information.
+    """
+    try:
+        created_session = await chat_service.create_chat_session(
+            user_id=current_user["user_id"],
+            session_data=session_data
+        )
+        
+        session_response = ChatSessionResponse(
+            session_id=created_session.session_id,
+            user_id=created_session.user_id,
+            data_source_id=created_session.data_source_id,
+            title=created_session.title,
+            message_count=created_session.message_count,
+            total_tokens_all_branches=created_session.total_tokens_all_branches,
+            active_branch_tokens=created_session.active_branch_tokens,
+            max_tokens=created_session.max_tokens,
+            created_at=created_session.created_at,
+            updated_at=created_session.updated_at
+        )
+        
+        return ChatSessionCreateResponse(
+            message="Chat session created successfully",
+            session=session_response
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating chat session: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while creating the chat session"
+        )
+
+
+@router.get(
+    "/sessions",
+    response_model=ChatSessionListResponse,
+    summary="Get user's chat sessions",
+    description="Get all chat sessions for the authenticated user."
+)
+async def get_user_chat_sessions(
+    limit: int = Query(50, ge=1, le=100, description="Maximum number of sessions to return"),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    chat_service: ChatService = Depends(get_chat_service)
+) -> ChatSessionListResponse:
+    """
+    Get all chat sessions for the current user.
+    
+    - **limit**: Maximum number of sessions to return (1-100)
+    
+    Returns all chat sessions owned by the authenticated user.
+    """
+    try:
+        sessions = await chat_service.get_user_chat_sessions(
+            user_id=current_user["user_id"],
+            limit=limit
+        )
+        
+        session_responses = []
+        for session in sessions:
+            session_responses.append(ChatSessionResponse(
+                session_id=session.session_id,
+                user_id=session.user_id,
+                data_source_id=session.data_source_id,
+                title=session.title,
+                message_count=session.message_count,
+                total_tokens_all_branches=session.total_tokens_all_branches,
+                active_branch_tokens=session.active_branch_tokens,
+                max_tokens=session.max_tokens,
+                created_at=session.created_at,
+                updated_at=session.updated_at
+            ))
+        
+        return ChatSessionListResponse(
+            message="Chat sessions retrieved successfully",
+            sessions=session_responses,
+            total_count=len(session_responses)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting user chat sessions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while retrieving chat sessions"
+        )
+
+
+@router.get(
+    "/sessions/paginated",
+    response_model=ChatSessionPaginatedListResponse,
+    summary="Get paginated user's chat sessions",
+    description="Get paginated chat sessions for the authenticated user."
+)
+async def get_user_chat_sessions_paginated(
+    limit: int = Query(10, ge=1, le=50, description="Number of sessions per page"),
+    last_key: Optional[str] = Query(None, description="Last evaluated key for pagination"),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    chat_service: ChatService = Depends(get_chat_service)
+) -> ChatSessionPaginatedListResponse:
+    """
+    Get paginated list of user's chat sessions.
+    
+    - **limit**: Number of sessions per page (1-50)
+    - **last_key**: Last evaluated key from previous page for pagination
+    
+    Returns paginated list of chat sessions with metadata.
+    """
+    try:
+        sessions, next_key = await chat_service.get_user_chat_sessions_paginated(
+            user_id=current_user["user_id"],
+            limit=limit,
+            last_evaluated_key=last_key
+        )
+        
+        session_responses = []
+        for session in sessions:
+            session_responses.append(ChatSessionResponse(
+                session_id=session.session_id,
+                user_id=session.user_id,
+                data_source_id=session.data_source_id,
+                title=session.title,
+                message_count=session.message_count,
+                total_tokens_all_branches=session.total_tokens_all_branches,
+                active_branch_tokens=session.active_branch_tokens,
+                max_tokens=session.max_tokens,
+                created_at=session.created_at,
+                updated_at=session.updated_at
+            ))
+        
+        # Calculate pagination metadata (simplified for DynamoDB)
+        has_next = next_key is not None
+        has_prev = last_key is not None
+        
+        pagination = PaginationMetadata(
+            page=1,  # DynamoDB doesn't use traditional page numbers
+            per_page=limit,
+            total=-1,  # Total count is expensive in DynamoDB
+            total_pages=-1,  # Cannot calculate without total
+            has_next=has_next,
+            has_prev=has_prev
+        )
+        
+        return ChatSessionPaginatedListResponse(
+            message="Chat sessions retrieved successfully",
+            sessions=session_responses,
+            pagination=pagination
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting paginated chat sessions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while retrieving chat sessions"
+        )
+
+
+@router.get(
+    "/sessions/{session_id}",
+    response_model=ChatSessionDetailResponse,
+    summary="Get chat session with conversation tree",
+    description="Get a specific chat session with its complete conversation tree."
+)
+async def get_chat_session_detail(
+    session_id: str = Path(..., description="ID of the chat session to retrieve"),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    chat_service: ChatService = Depends(get_chat_service)
+) -> ChatSessionDetailResponse:
+    """
+    Get chat session with conversation tree.
+    
+    - **session_id**: ID of the chat session to retrieve
+    
+    Returns the chat session information with complete conversation tree.
+    """
+    try:
+        session, conversation_tree = await chat_service.get_chat_session_with_conversation(
+            user_id=current_user["user_id"],
+            session_id=session_id
+        )
+        
+        return ChatSessionDetailResponse(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            data_source_id=session.data_source_id,
+            title=session.title,
+            message_count=session.message_count,
+            total_tokens_all_branches=session.total_tokens_all_branches,
+            active_branch_tokens=session.active_branch_tokens,
+            max_tokens=session.max_tokens,
+            created_at=session.created_at,
+            updated_at=session.updated_at,
+            conversation_tree=conversation_tree
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting chat session detail: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while retrieving the chat session"
+        )
+
+
+@router.put(
+    "/sessions/{session_id}",
+    response_model=ChatSessionUpdateResponse,
+    summary="Update chat session",
+    description="Update chat session details (e.g., title)."
+)
+async def update_chat_session(
+    session_id: str = Path(..., description="ID of the chat session to update"),
+    update_data: ChatSessionUpdateRequest = ...,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    chat_service: ChatService = Depends(get_chat_service)
+) -> ChatSessionUpdateResponse:
+    """
+    Update chat session information.
+    
+    - **session_id**: ID of the chat session to update
+    - **title**: Updated session title (optional)
+    
+    Only the owner can update their chat session.
+    """
+    try:
+        updated_session = await chat_service.update_chat_session(
+            user_id=current_user["user_id"],
+            session_id=session_id,
+            update_data=update_data
+        )
+        
+        session_response = ChatSessionResponse(
+            session_id=updated_session.session_id,
+            user_id=updated_session.user_id,
+            data_source_id=updated_session.data_source_id,
+            title=updated_session.title,
+            message_count=updated_session.message_count,
+            total_tokens_all_branches=updated_session.total_tokens_all_branches,
+            active_branch_tokens=updated_session.active_branch_tokens,
+            max_tokens=updated_session.max_tokens,
+            created_at=updated_session.created_at,
+            updated_at=updated_session.updated_at
+        )
+        
+        return ChatSessionUpdateResponse(
+            message="Chat session updated successfully",
+            session=session_response
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating chat session: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while updating the chat session"
+        )
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    response_model=ChatSessionDeleteResponse,
+    summary="Delete chat session",
+    description="Delete a chat session and all its messages."
+)
+async def delete_chat_session(
+    session_id: str = Path(..., description="ID of the chat session to delete"),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    chat_service: ChatService = Depends(get_chat_service)
+) -> ChatSessionDeleteResponse:
+    """
+    Delete chat session.
+    
+    - **session_id**: ID of the chat session to delete
+    
+    Permanently deletes the chat session and all its messages. Only the owner can delete their session.
+    """
+    try:
+        message = await chat_service.delete_chat_session(
+            user_id=current_user["user_id"],
+            session_id=session_id
+        )
+        
+        return ChatSessionDeleteResponse(message=message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting chat session: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while deleting the chat session"
+        )
+
+
+@router.post(
+    "/sessions/{session_id}/messages",
+    response_model=ChatMessageResponse,
+    summary="Send a message to the chat",
+    description="Send a message to the AI and get a response."
+)
+async def send_message(
+    session_id: str = Path(..., description="ID of the chat session"),
+    message_data: ChatMessageRequest = ...,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    chat_service: ChatService = Depends(get_chat_service)
+) -> ChatMessageResponse:
+    """
+    Send a message to the AI chat.
+    
+    - **session_id**: ID of the chat session
+    - **content**: Message content to send to the AI
+    - **parent_message_id**: Optional parent message ID for branching conversations
+    
+    Returns both the user message and AI response.
+    """
+    try:
+        user_message, assistant_message, updated_session = await chat_service.send_message(
+            user_id=current_user["user_id"],
+            session_id=session_id,
+            message_data=message_data
+        )
+        
+        user_message_response = MessageResponse(
+            message_id=user_message.message_id,
+            session_id=user_message.session_id,
+            user_id=user_message.user_id,
+            role=MessageRole(user_message.role),
+            content=user_message.content,
+            message_index=user_message.message_index,
+            parent_message_id=user_message.parent_message_id,
+            token_count=user_message.token_count,
+            is_active=user_message.is_active,
+            created_at=user_message.created_at
+        )
+        
+        assistant_message_response = MessageResponse(
+            message_id=assistant_message.message_id,
+            session_id=assistant_message.session_id,
+            user_id=assistant_message.user_id,
+            role=MessageRole(assistant_message.role),
+            content=assistant_message.content,
+            message_index=assistant_message.message_index,
+            parent_message_id=assistant_message.parent_message_id,
+            token_count=assistant_message.token_count,
+            is_active=assistant_message.is_active,
+            created_at=assistant_message.created_at
+        )
+        
+        session_response = ChatSessionResponse(
+            session_id=updated_session.session_id,
+            user_id=updated_session.user_id,
+            data_source_id=updated_session.data_source_id,
+            title=updated_session.title,
+            message_count=updated_session.message_count,
+            total_tokens_all_branches=updated_session.total_tokens_all_branches,
+            active_branch_tokens=updated_session.active_branch_tokens,
+            max_tokens=updated_session.max_tokens,
+            created_at=updated_session.created_at,
+            updated_at=updated_session.updated_at
+        )
+        
+        return ChatMessageResponse(
+            message="Message sent successfully",
+            user_message=user_message_response,
+            assistant_message=assistant_message_response,
+            session=session_response
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while sending the message"
+        )
+
+
+@router.put(
+    "/sessions/{session_id}/messages/edit",
+    response_model=EditMessageResponse,
+    summary="Edit a message and regenerate response",
+    description="Edit a user message and regenerate the AI response from that point."
+)
+async def edit_message(
+    session_id: str = Path(..., description="ID of the chat session"),
+    edit_data: EditMessageRequest = ...,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    chat_service: ChatService = Depends(get_chat_service)
+) -> EditMessageResponse:
+    """
+    Edit a message and regenerate the conversation.
+    
+    - **session_id**: ID of the chat session
+    - **message_id**: ID of the message to edit (must be a user message)
+    - **new_content**: New content for the message
+    
+    This will edit the specified message and regenerate the AI response, creating a new conversation branch.
+    """
+    try:
+        edited_message, new_assistant_message, updated_session = await chat_service.edit_message(
+            user_id=current_user["user_id"],
+            session_id=session_id,
+            edit_data=edit_data
+        )
+        
+        edited_message_response = MessageResponse(
+            message_id=edited_message.message_id,
+            session_id=edited_message.session_id,
+            user_id=edited_message.user_id,
+            role=MessageRole(edited_message.role),
+            content=edited_message.content,
+            message_index=edited_message.message_index,
+            parent_message_id=edited_message.parent_message_id,
+            token_count=edited_message.token_count,
+            is_active=edited_message.is_active,
+            created_at=edited_message.created_at
+        )
+        
+        new_assistant_message_response = MessageResponse(
+            message_id=new_assistant_message.message_id,
+            session_id=new_assistant_message.session_id,
+            user_id=new_assistant_message.user_id,
+            role=MessageRole(new_assistant_message.role),
+            content=new_assistant_message.content,
+            message_index=new_assistant_message.message_index,
+            parent_message_id=new_assistant_message.parent_message_id,
+            token_count=new_assistant_message.token_count,
+            is_active=new_assistant_message.is_active,
+            created_at=new_assistant_message.created_at
+        )
+        
+        session_response = ChatSessionResponse(
+            session_id=updated_session.session_id,
+            user_id=updated_session.user_id,
+            data_source_id=updated_session.data_source_id,
+            title=updated_session.title,
+            message_count=updated_session.message_count,
+            total_tokens_all_branches=updated_session.total_tokens_all_branches,
+            active_branch_tokens=updated_session.active_branch_tokens,
+            max_tokens=updated_session.max_tokens,
+            created_at=updated_session.created_at,
+            updated_at=updated_session.updated_at
+        )
+        
+        return EditMessageResponse(
+            message="Message edited and response regenerated successfully",
+            edited_message=edited_message_response,
+            new_assistant_message=new_assistant_message_response,
+            session=session_response
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while editing the message"
+        )
+
+
+
+
