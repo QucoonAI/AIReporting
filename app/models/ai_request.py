@@ -1,17 +1,13 @@
 from pydantic import BaseModel
-from typing import List, Union
-
 
 class User(BaseModel):
     userName: str
 
 class DataSourceCred(BaseModel):
-    dataSourceId: str
-    dataSourceName: str
-    dataSourceType: str
+    dataSourceId: str   # Points to the connection string and the database schema
 
 class MessageRequest(BaseModel):
-    userMessage: str
+    userMessage: str 
 
 class AIRequest(BaseModel):
     userInformation: User

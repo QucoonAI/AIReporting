@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Union, Literal, Optional
+from typing import Union, Literal
 
 
 class TextResponse(BaseModel):
