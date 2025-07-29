@@ -12,7 +12,7 @@ from core.exceptions import (
 from core.utils import logger
 from config.database import SessionDep
 from services.redis import AsyncRedisService
-from services.email import (
+from app.services.email_service import (
     EmailService, send_verification_email_task, send_password_reset_email_task,
     send_password_change_email_task
 )

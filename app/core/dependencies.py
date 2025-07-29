@@ -5,7 +5,7 @@ from config.database import SessionDep
 from config.redis import redis_manager
 from config.settings import get_settings
 from services.redis import AsyncRedisService
-from services.email import EmailService
+from app.services.email_service import EmailService
 from services.user import UserService
 from services.data_source import DataSourceService
 from services.chat import ChatService
