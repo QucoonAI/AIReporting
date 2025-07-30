@@ -5,10 +5,10 @@ from config.database import SessionDep
 from config.redis import redis_manager
 from config.settings import get_settings
 from services.redis import AsyncRedisService
-from services.email import EmailService
+from app.services.email_service import EmailService
 from services.user import UserService
 from services.data_source import DataSourceService
-from services.chat import ChatService
+from app.services.chat_service import ChatService
 from services.llm import MockLLMService
 from repositories.user import UserRepository
 from repositories.data_source import DataSourceRepository

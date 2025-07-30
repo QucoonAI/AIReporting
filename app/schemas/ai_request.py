@@ -9,7 +9,12 @@ class DataSourceCred(BaseModel):
 class MessageRequest(BaseModel):
     userMessage: str 
 
+class CreateSessionRequest(BaseModel):
+    sessionName: str
+    sessionRequest: DataSourceCred
+
 class AIRequest(BaseModel):
     userInformation: User
-    dataSourceCred: DataSourceCred
+    sessionId: str
     messageRequest: MessageRequest
+
