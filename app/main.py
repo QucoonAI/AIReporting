@@ -20,7 +20,7 @@ def create_application(lifespan=None):
 async def lifespan(app: FastAPI):
     try:
         logger.info("📊 Initializing DynamoDB tables...")
-        db_init_success = await initialize_database()
+        db_init_success = initialize_database()
         
         if not db_init_success:
             logger.error("❌ Database initialization failed")
@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
         
         # Verify tables are ready
         logger.info("🔍 Verifying database tables...")
-        db_verify_success = await verify_database()
+        db_verify_success = verify_database()
         
         if db_verify_success:
             logger.info("✅ Database setup completed successfully")

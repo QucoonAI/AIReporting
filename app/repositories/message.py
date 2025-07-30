@@ -1,5 +1,4 @@
 import uuid
-import boto3
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
@@ -10,8 +9,8 @@ from core.utils import logger
 class MessageRepository:
     """Repository class for handling Message DynamoDB operations."""
 
-    def __init__(self, dynamodb_client=None):
-        self.dynamodb = dynamodb_client or boto3.client('dynamodb')
+    def __init__(self, dynamodb_client):
+        self.dynamodb = dynamodb_client
         self.message_table_name = 'Messages'
     
     async def create_message(

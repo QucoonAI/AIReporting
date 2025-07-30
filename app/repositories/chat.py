@@ -1,5 +1,4 @@
 import uuid
-import boto3
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
@@ -9,8 +8,8 @@ from core.utils import logger
 class ChatRepository:
     """Repository class for handling Chat and Message DynamoDB operations."""
     
-    def __init__(self, dynamodb_client=None):
-        self.dynamodb = dynamodb_client or boto3.client('dynamodb')
+    def __init__(self, dynamodb_client):
+        self.dynamodb = dynamodb_client
         self.chat_table_name = 'ChatSessions'
 
     async def create_chat_session(
@@ -26,7 +25,6 @@ class ChatRepository:
             user_id: ID of the user creating the session
             data_source_id: ID of the associated data source
             title: Session title
-            max_tokens: Maximum tokens allowed for this session
             
         Returns:
             Created chat session dict
@@ -117,20 +115,11 @@ class ChatRepository:
         try:
             # Build update expression
             update_expression = "SET updated_at = :updated_at"
-            expression_values = {':updated_at': {'S': datetime.utcnow().isoformat()}}
+            expression_values = {':updated_at': {'S': datetime.now(timezone.utc).isoformat()}}
             
             if 'title' in updates:
                 update_expression += ", title = :title"
                 expression_values[':title'] = {'S': updates['title']}
-            if 'message_count' in updates:
-                update_expression += ", message_count = :message_count"
-                expression_values[':message_count'] = {'N': str(updates['message_count'])}
-            if 'total_tokens_all_branches' in updates:
-                update_expression += ", total_tokens_all_branches = :total_tokens"
-                expression_values[':total_tokens'] = {'N': str(updates['total_tokens_all_branches'])}
-            if 'active_branch_tokens' in updates:
-                update_expression += ", active_branch_tokens = :active_tokens"
-                expression_values[':active_tokens'] = {'N': str(updates['active_branch_tokens'])}
             
             response = self.dynamodb.update_item(
                 TableName=self.chat_table_name,
@@ -171,10 +160,7 @@ class ChatRepository:
             True if deleted successfully, False if not found
         """
         try:
-            # First delete all messages in the session
-            await self.delete_all_session_messages(session_id)
             
-            # Then delete the session
             response = self.dynamodb.delete_item(
                 TableName=self.chat_table_name,
                 Key={
@@ -328,10 +314,6 @@ class ChatRepository:
             'user_id': int(item['user_id']['N']),
             'data_source_id': int(item['data_source_id']['N']),
             'title': item['title']['S'],
-            'message_count': int(item['message_count']['N']),
-            'total_tokens_all_branches': int(item['total_tokens_all_branches']['N']),
-            'active_branch_tokens': int(item['active_branch_tokens']['N']),
-            'max_tokens': int(item['max_tokens']['N']),
             'created_at': item['created_at']['S'],
             'updated_at': item['updated_at']['S']
         }

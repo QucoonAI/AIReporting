@@ -43,16 +43,12 @@ async def create_chat_session(
         )
         
         session_response = ChatSessionResponse(
-            session_id=created_session.session_id,
-            user_id=created_session.user_id,
-            data_source_id=created_session.data_source_id,
-            title=created_session.title,
-            message_count=created_session.message_count,
-            total_tokens_all_branches=created_session.total_tokens_all_branches,
-            active_branch_tokens=created_session.active_branch_tokens,
-            max_tokens=created_session.max_tokens,
-            created_at=created_session.created_at,
-            updated_at=created_session.updated_at
+            session_id=created_session["session_id"],
+            user_id=created_session["user_id"],
+            data_source_id=created_session["data_source_id"],
+            title=created_session["title"],
+            created_at=created_session["created_at"],
+            updated_at=created_session["updated_at"]
         )
         
         return ChatSessionCreateResponse(
@@ -96,16 +92,12 @@ async def get_user_chat_sessions(
         session_responses = []
         for session in sessions:
             session_responses.append(ChatSessionResponse(
-                session_id=session.session_id,
-                user_id=session.user_id,
-                data_source_id=session.data_source_id,
-                title=session.title,
-                message_count=session.message_count,
-                total_tokens_all_branches=session.total_tokens_all_branches,
-                active_branch_tokens=session.active_branch_tokens,
-                max_tokens=session.max_tokens,
-                created_at=session.created_at,
-                updated_at=session.updated_at
+                session_id=session["session_id"],
+                user_id=session["user_id"],
+                data_source_id=session["data_source_id"],
+                title=session["title"],
+                created_at=session["created_at"],
+                updated_at=session["updated_at"]
             ))
         
         return ChatSessionListResponse(
@@ -153,16 +145,12 @@ async def get_user_chat_sessions_paginated(
         session_responses = []
         for session in sessions:
             session_responses.append(ChatSessionResponse(
-                session_id=session.session_id,
-                user_id=session.user_id,
-                data_source_id=session.data_source_id,
-                title=session.title,
-                message_count=session.message_count,
-                total_tokens_all_branches=session.total_tokens_all_branches,
-                active_branch_tokens=session.active_branch_tokens,
-                max_tokens=session.max_tokens,
-                created_at=session.created_at,
-                updated_at=session.updated_at
+                session_id=session["session_id"],
+                user_id=session["user_id"],
+                data_source_id=session["data_source_id"],
+                title=session["title"],
+                created_at=session["created_at"],
+                updated_at=session["updated_at"]
             ))
         
         # Calculate pagination metadata (simplified for DynamoDB)
@@ -218,16 +206,12 @@ async def get_chat_session_detail(
         )
         
         return ChatSessionDetailResponse(
-            session_id=session.session_id,
-            user_id=session.user_id,
-            data_source_id=session.data_source_id,
-            title=session.title,
-            message_count=session.message_count,
-            total_tokens_all_branches=session.total_tokens_all_branches,
-            active_branch_tokens=session.active_branch_tokens,
-            max_tokens=session.max_tokens,
-            created_at=session.created_at,
-            updated_at=session.updated_at,
+            session_id=session["session_id"],
+            user_id=session["user_id"],
+            data_source_id=session["data_source_id"],
+            title=session["title"],
+            created_at=session["created_at"],
+            updated_at=session["updated_at"],
             conversation_tree=conversation_tree
         )
     except HTTPException:
@@ -268,16 +252,12 @@ async def update_chat_session(
         )
         
         session_response = ChatSessionResponse(
-            session_id=updated_session.session_id,
-            user_id=updated_session.user_id,
-            data_source_id=updated_session.data_source_id,
-            title=updated_session.title,
-            message_count=updated_session.message_count,
-            total_tokens_all_branches=updated_session.total_tokens_all_branches,
-            active_branch_tokens=updated_session.active_branch_tokens,
-            max_tokens=updated_session.max_tokens,
-            created_at=updated_session.created_at,
-            updated_at=updated_session.updated_at
+            session_id=updated_session["session_id"],
+            user_id=updated_session["user_id"],
+            data_source_id=updated_session["data_source_id"],
+            title=updated_session["title"],
+            created_at=updated_session["created_at"],
+            updated_at=updated_session["updated_at"]
         )
         
         return ChatSessionUpdateResponse(
@@ -358,42 +338,38 @@ async def send_message(
         )
         
         user_message_response = MessageResponse(
-            message_id=user_message.message_id,
-            session_id=user_message.session_id,
-            user_id=user_message.user_id,
-            role=MessageRole(user_message.role),
-            content=user_message.content,
-            message_index=user_message.message_index,
-            parent_message_id=user_message.parent_message_id,
-            token_count=user_message.token_count,
-            is_active=user_message.is_active,
-            created_at=user_message.created_at
+            message_id=user_message["message_id"],
+            session_id=user_message["session_id"],
+            user_id=user_message["user_id"],
+            role=MessageRole.USER,
+            content=user_message["content"],
+            message_index=user_message["message_index"],
+            parent_message_id=user_message["parent_message_id"],
+            token_count=user_message["token_count"],
+            is_active=user_message["is_active"],
+            created_at=user_message["created_at"]
         )
         
         assistant_message_response = MessageResponse(
-            message_id=assistant_message.message_id,
-            session_id=assistant_message.session_id,
-            user_id=assistant_message.user_id,
-            role=MessageRole(assistant_message.role),
-            content=assistant_message.content,
-            message_index=assistant_message.message_index,
-            parent_message_id=assistant_message.parent_message_id,
-            token_count=assistant_message.token_count,
-            is_active=assistant_message.is_active,
-            created_at=assistant_message.created_at
+            message_id=assistant_message["message_id"],
+            session_id=assistant_message["session_id"],
+            user_id=assistant_message["user_id"],
+            role=MessageRole.ASSISTANT,
+            content=assistant_message["content"],
+            message_index=assistant_message["message_index"],
+            parent_message_id=assistant_message["parent_message_id"],
+            token_count=assistant_message["token_count"],
+            is_active=assistant_message["is_active"],
+            created_at=assistant_message["created_at"]
         )
         
         session_response = ChatSessionResponse(
-            session_id=updated_session.session_id,
-            user_id=updated_session.user_id,
-            data_source_id=updated_session.data_source_id,
-            title=updated_session.title,
-            message_count=updated_session.message_count,
-            total_tokens_all_branches=updated_session.total_tokens_all_branches,
-            active_branch_tokens=updated_session.active_branch_tokens,
-            max_tokens=updated_session.max_tokens,
-            created_at=updated_session.created_at,
-            updated_at=updated_session.updated_at
+            session_id=updated_session["session_id"],
+            user_id=updated_session["user_id"],
+            data_source_id=updated_session["data_source_id"],
+            title=updated_session["title"],
+            created_at=updated_session["created_at"],
+            updated_at=updated_session["updated_at"]
         )
         
         return ChatMessageResponse(
@@ -467,16 +443,12 @@ async def edit_message(
         )
         
         session_response = ChatSessionResponse(
-            session_id=updated_session.session_id,
-            user_id=updated_session.user_id,
-            data_source_id=updated_session.data_source_id,
-            title=updated_session.title,
-            message_count=updated_session.message_count,
-            total_tokens_all_branches=updated_session.total_tokens_all_branches,
-            active_branch_tokens=updated_session.active_branch_tokens,
-            max_tokens=updated_session.max_tokens,
-            created_at=updated_session.created_at,
-            updated_at=updated_session.updated_at
+            ssession_id=updated_session["session_id"],
+            user_id=updated_session["user_id"],
+            data_source_id=updated_session["data_source_id"],
+            title=updated_session["title"],
+            created_at=updated_session["created_at"],
+            updated_at=updated_session["updated_at"]
         )
         
         return EditMessageResponse(

@@ -23,5 +23,4 @@ class User(SQLModel, table=True):
     user_profile: "UserProfile" = Relationship(back_populates="profile_user", cascade_delete=True)
     social_accounts: List["UserSocialConnection"] = Relationship(back_populates="social_user", cascade_delete=True)
     data_sources: List["DataSource"] = Relationship(back_populates="data_source_owner", cascade_delete=True)
-    user_chats: List["Chat"] = Relationship(back_populates="chat_user", cascade_delete=True)
 

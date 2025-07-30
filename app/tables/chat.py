@@ -60,9 +60,6 @@ def get_table_definition(environment: str = 'dev') -> Dict[str, Any]:
                 }
             }
         ],
-        'PointInTimeRecoverySpecification': {
-            'PointInTimeRecoveryEnabled': True
-        },
         'SSESpecification': {
             'Enabled': True
         },

@@ -102,8 +102,10 @@ class DataSourceRepository:
             if not data_source:
                 return False
             
-            await self.session.delete(data_source)
+            data_source.data_source_is_active = False
+            self.session.add(data_source)
             await self.session.commit()
+            await self.session.refresh(data_source)
             
             return True
             

@@ -7,6 +7,34 @@ from schemas.enum import DataSourceType
 
 class DataSourceUrlValidator:
     """Utility class for validating data source URLs based on type"""
+
+    @staticmethod
+    def _validate_file_type_match(data_type: 'DataSourceType', url: str) -> None:
+        """Validate that the URL matches the expected file type"""
+        url_lower = url.lower()
+        
+        if data_type == DataSourceType.CSV:
+            if not url_lower.endswith('.csv'):
+                raise ValueError('URL must point to a CSV file (.csv extension required)')
+                
+        elif data_type == DataSourceType.XLSX:
+            if not (url_lower.endswith('.xlsx') or url_lower.endswith('.xls')):
+                raise ValueError('URL must point to an Excel file (.xlsx or .xls extension required)')
+                
+        elif data_type == DataSourceType.PDF:
+            if not url_lower.endswith('.pdf'):
+                raise ValueError('URL must point to a PDF file (.pdf extension required)')
+                
+        elif data_type == DataSourceType.GOOGLE:
+            # Google Sheets URL patterns
+            google_patterns = [
+                r'docs\.google\.com/spreadsheets',
+                r'drive\.google\.com/file/d/[a-zA-Z0-9-_]+.*',
+                r'sheets\.googleapis\.com'
+            ]
+            
+            if not any(re.search(pattern, url, re.IGNORECASE) for pattern in google_patterns):
+                raise ValueError('URL must be a valid Google Sheets link (docs.google.com/spreadsheets, drive.google.com, or sheets.googleapis.com)')
     
     @staticmethod
     def validate_and_convert_url(data_type: 'DataSourceType', url: Union[str, 'FileUrl', 'PostgresDsn', 'MySQLDsn', 'MongoDsn']) -> Union[str, 'FileUrl', 'PostgresDsn', 'MySQLDsn', 'MongoDsn']:
@@ -15,6 +43,7 @@ class DataSourceUrlValidator:
             return url
         
         if data_type in [DataSourceType.CSV, DataSourceType.XLSX, DataSourceType.GOOGLE, DataSourceType.PDF]:
+            DataSourceUrlValidator._validate_file_type_match(data_type, url)
             try:
                 return FileUrl(url)
             except Exception as e:
@@ -81,10 +110,30 @@ class DataSourceBase(BaseModel):
 
 
 # Request schemas
-class DataSourceCreateRequest(DataSourceBase):
+class DataSourceCreateRequest(BaseModel):
     """Schema for creating a new data source"""
-    pass
+    data_source_name: str = Field(..., min_length=1, max_length=255, description="Name of the data source")
+    data_source_type: DataSourceType = Field(..., description="Type of the data source")
+    data_source_url: Union[str, FileUrl, PostgresDsn, MySQLDsn, MongoDsn] = Field(
+        ..., description="URL of the data source"
+    )
 
+    @field_validator('data_source_name')
+    @classmethod
+    def validate_name(cls, v):
+        return DataSourceUrlValidator.validate_name(v)
+
+    @model_validator(mode='after')
+    def validate_url_based_on_type(self):
+        # For file-based types, we'll skip URL validation since it will be replaced with S3 URL
+        file_based_types = [DataSourceType.CSV, DataSourceType.XLSX, DataSourceType.PDF]
+        
+        if self.data_source_type not in file_based_types:
+            self.data_source_url = DataSourceUrlValidator.validate_and_convert_url(
+                self.data_source_type, self.data_source_url
+            )
+        
+        return self
 
 class DataSourceUpdateRequest(BaseModel):
     """Schema for updating a data source"""
@@ -112,10 +161,13 @@ class DataSourceUpdateRequest(BaseModel):
 
 
 # Response schemas
-class DataSourceResponse(DataSourceBase):
+class DataSourceResponse(BaseModel):
     """Schema for data source response"""
     data_source_id: int
     data_source_user_id: int
+    data_source_name: str = Field(..., min_length=1, max_length=255, description="Name of the data source")
+    data_source_type: DataSourceType = Field(..., description="Type of the data source")
+    data_source_url: str = Field(..., description="URL of the data source")
     data_source_created_at: datetime
     data_source_updated_at: datetime
 

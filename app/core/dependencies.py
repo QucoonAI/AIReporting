@@ -1,11 +1,13 @@
 from typing import Dict, Any
+
+import boto3
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from config.database import SessionDep
 from config.redis import redis_manager
 from config.settings import get_settings
 from services.redis import AsyncRedisService
-from app.services.email_service import EmailService
+from services.email_service import EmailService
 from services.user import UserService
 from services.data_source import DataSourceService
 from services.chat import ChatService
@@ -13,10 +15,12 @@ from services.llm import MockLLMService
 from repositories.user import UserRepository
 from repositories.data_source import DataSourceRepository
 from repositories.chat import ChatRepository
+from repositories.message import MessageRepository
 
 
 security = HTTPBearer()
 settings = get_settings()
+dynamodb_client = boto3.client('dynamodb', region_name=settings.AWS_REGION)
 
 
 def get_user_repo(db_session: SessionDep = SessionDep) -> UserRepository:  # type: ignore
@@ -28,7 +32,14 @@ def get_data_source_repo(db_session: SessionDep = SessionDep) -> DataSourceRepos
 
 def get_chat_repo() -> ChatRepository:
     """Dependency to get ChatRepository instance"""
-    return ChatRepository()
+    return ChatRepository(dynamodb_client=dynamodb_client)
+
+def get_message_repo() -> MessageRepository:
+    """Dependency to get MessageRepository instance"""
+    return MessageRepository(dynamodb_client=dynamodb_client)
+
+
+
 
 def get_redis_service() -> AsyncRedisService:
     return AsyncRedisService(redis_client=redis_manager.get_client())
@@ -59,11 +70,12 @@ def get_llm_service() -> MockLLMService:
 
 def get_chat_service(
     chat_repo: ChatRepository = Depends(get_chat_repo),
+    message_repo: MessageRepository = Depends(get_message_repo),
     data_source_repo: DataSourceRepository = Depends(get_data_source_repo),
     llm_service: MockLLMService = Depends(get_llm_service)
 ) -> ChatService:
     """Dependency to get ChatService instance"""
-    return ChatService(chat_repo, data_source_repo, llm_service)
+    return ChatService(chat_repo, message_repo, data_source_repo, llm_service)
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),

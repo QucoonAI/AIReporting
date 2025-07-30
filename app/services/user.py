@@ -12,7 +12,7 @@ from core.exceptions import (
 from core.utils import logger
 from config.database import SessionDep
 from services.redis import AsyncRedisService
-from app.services.email_service import (
+from services.email_service import (
     EmailService, send_verification_email_task, send_password_reset_email_task,
     send_password_change_email_task
 )
@@ -34,7 +34,8 @@ class UserService:
         
     def _hash_password(self, password: str) -> str:
         """Hash a password using bcrypt."""
-        return self.pwd_context.hash(password)
+        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        return pwd_context.hash(password)
     
     def _verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """Verify a password against its hash."""

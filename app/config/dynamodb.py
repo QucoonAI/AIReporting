@@ -5,6 +5,7 @@ import boto3
 from botocore.exceptions import ClientError
 from config.settings import get_settings
 from core.utils import logger
+from tables import chat, message
 
 
 settings = get_settings()
@@ -166,7 +167,7 @@ class DatabaseSetup:
             bool: True if all tables created successfully
         """
         if table_definitions is None:
-            table_definitions = self.discover_table_definitions()
+            table_definitions = [chat.get_table_definition(), message.get_table_definition()]
         
         if not table_definitions:
             logger.warning("No table definitions found")

@@ -76,10 +76,6 @@ class ChatSessionResponse(BaseModel):
     user_id: int
     data_source_id: int
     title: str
-    message_count: int
-    total_tokens_all_branches: int
-    active_branch_tokens: int
-    max_tokens: int
     created_at: datetime
     updated_at: datetime
 
