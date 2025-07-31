@@ -1,7 +1,7 @@
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
-from services.data_source import DataSourceService
-from schemas.data_source import (
+from app.services.data_source import DataSourceService
+from app.schemas.data_source import (
     DataSourceCreateRequest,
     DataSourceUpdateRequest,
     DataSourceCreateResponse,
@@ -11,10 +11,10 @@ from schemas.data_source import (
     DataSourcePaginatedListResponse,
     PaginationMetadata
 )
-from schemas.enum import DataSourceType
-from models.user import User
-from core.dependencies import get_current_user, get_data_source_service
-from core.utils import logger
+from app.schemas.enum import DataSourceType
+from app.models.user import User
+from app.core.dependencies import get_current_user, get_data_source_service
+from app.core.utils import logger
 
 
 router = APIRouter(prefix="/api/v1/data-sources", tags=["Data Sources"])

@@ -1,14 +1,15 @@
 from typing import Optional, List, Dict, Any, Tuple
 from fastapi import HTTPException, status
-from repositories.chat import ChatRepository
-from repositories.message import MessageRepository
-from repositories.data_source import DataSourceRepository
-from services.llm import MockLLMService
-from schemas.chat import (
+from app.repositories.chat import ChatRepository
+from app.repositories.message import MessageRepository
+from app.repositories.data_source import DataSourceRepository
+from app.services.llm_services.llm import MockLLMService
+from .redis_managers.factory import RedisServiceFactory
+from app.schemas.chat import (
     ChatSessionCreateRequest, ChatSessionUpdateRequest, ChatMessageRequest,
     EditMessageRequest, MessageRole, ConversationTree, MessageResponse
 )
-from core.utils import logger
+from app.core.utils import logger
 
 
 class ChatService:
@@ -19,14 +20,17 @@ class ChatService:
         chat_repo: ChatRepository,
         message_repo: MessageRepository,
         data_source_repo: DataSourceRepository,
-        llm_service: MockLLMService
+        llm_service: MockLLMService,
+        redis_factory: RedisServiceFactory
     ):
         self.chat_repo = chat_repo
         self.message_repo = message_repo
         self.data_source_repo = data_source_repo
         self.llm_service = llm_service
+        self.redis_factory = redis_factory
+        self.chat_cache = redis_factory.chat_cache_service
         self.default_max_tokens = 50000
-        self.token_warning_threshold = 0.8  # Warn when 80% of tokens used
+        self.token_warning_threshold = 0.8
     
     async def create_chat_session(
         self,
@@ -307,7 +311,10 @@ class ChatService:
                     detail="Chat session not found"
                 )
             
-            # Delete all messages first
+            # Invalidate cache first
+            await self.chat_cache.invalidate_session_cache(session_id)
+            
+            # Delete all messages
             await self.message_repo.delete_all_session_messages(session_id)
             
             # Then delete the session
@@ -336,23 +343,15 @@ class ChatService:
         user_id: int,
         session_id: str,
         message_data: ChatMessageRequest
-    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Optional[str]]:
         """
-        Send a message and get AI response.
+        Send message following the specified algorithm with ChatCacheService.
         
-        Args:
-            user_id: ID of the user
-            session_id: ID of the chat session
-            message_data: Message data
-            
         Returns:
-            Tuple of (user_message, assistant_message, updated_session)
-            
-        Raises:
-            HTTPException: If session not found, token limit exceeded, or processing fails
+            Tuple of (user_message, assistant_message, updated_session, limit_message)
         """
         try:
-            # Verify session exists and belongs to user
+            # 1. Basic validation of session
             session = await self.chat_repo.get_chat_session(user_id, session_id)
             if not session:
                 raise HTTPException(
@@ -360,24 +359,47 @@ class ChatService:
                     detail="Chat session not found"
                 )
             
-            # Calculate user message tokens
-            user_token_count = self.llm_service.calculate_token_count(message_data.content)
-            
-            # Check token limits (using default max_tokens since it's not in the simplified session)
-            current_active_tokens = await self.message_repo.calculate_active_branch_tokens(session_id)
-            estimated_response_tokens = user_token_count * 2  # Rough estimate
-            
-            if current_active_tokens + user_token_count + estimated_response_tokens > self.default_max_tokens:
+            # 2. NEW: Check if session is already at token limit
+            is_at_limit = await self.chat_cache.is_session_at_limit(session_id)
+            if is_at_limit:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Token limit would be exceeded. Current: {current_active_tokens}, "
-                           f"Max: {self.default_max_tokens}"
+                    detail="Chat session has reached the maximum token limit. Please start a new session to continue."
                 )
             
-            # Get next message index (using current message count from session)
+            # 2.1 Token check
+            user_token_count = self.llm_service.calculate_token_count(message_data.content)
+            
+            # 2.2 Get context messages, tokens, and session info (cache-first)
+            context_messages, context_token_count, session_info = await self._get_context_with_tokens_cached(
+                session_id, session['data_source_id'], message_data.parent_message_id
+            )
+            
+            # 2.3 Block if user message alone exceeds limit
+            if context_token_count + user_token_count > self.default_max_tokens:
+                token_info = await self.chat_cache.get_session_token_info(session_id)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Message too long. Current session: {context_token_count:,} tokens, "
+                        f"Your message: {user_token_count:,} tokens, "
+                        f"Would total: {context_token_count + user_token_count:,} tokens. "
+                        f"Session limit: {self.default_max_tokens:,} tokens. "
+                        f"Please start a new session or send a shorter message."
+                )
+            
+            # 3. Generate AI response
+            ai_response = await self._generate_ai_response(
+                message_data.content, context_messages, session_info
+            )
+            
+            # 3.1 NEW: Check if AI response would exceed the limit
+            total_after_ai = context_token_count + user_token_count + ai_response["token_count"]
+            if total_after_ai > self.default_max_tokens:
+                logger.warning(f"Session {session_id} will reach limit after AI response: {total_after_ai} tokens")
+            
+            # 4. Store both messages in database
             next_index = session.get('message_count', 0)
             
-            # Create user message
             user_message = await self.message_repo.create_message(
                 session_id=session_id,
                 user_id=user_id,
@@ -388,24 +410,6 @@ class ChatService:
                 parent_message_id=message_data.parent_message_id
             )
             
-            # Get data source info for context
-            data_source = await self.data_source_repo.get_data_source_by_id(session['data_source_id'])
-            data_source_info = {
-                "type": data_source.data_source_type.value if data_source else "unknown",
-                "name": data_source.data_source_name if data_source else "Unknown"
-            }
-            
-            # Get conversation history for context
-            conversation_history = await self._get_conversation_context(session_id, user_message['message_id'])
-            
-            # Generate AI response
-            ai_response = await self.llm_service.generate_response_with_context(
-                message=message_data.content,
-                conversation_history=conversation_history,
-                data_source_info=data_source_info
-            )
-            
-            # Create assistant message
             assistant_message = await self.message_repo.create_message(
                 session_id=session_id,
                 user_id=user_id,
@@ -416,20 +420,43 @@ class ChatService:
                 parent_message_id=user_message['message_id']
             )
             
-            # Update session statistics
-            new_total_tokens = await self.message_repo.calculate_total_session_tokens(session_id)
-            new_active_tokens = await self.message_repo.calculate_active_branch_tokens(session_id)
+            # 5. Update cache with new messages (no trimming)
+            new_messages = [
+                {
+                    "role": MessageRole.USER.value,
+                    "content": message_data.content,
+                    "token_count": user_token_count,
+                    "message_id": user_message['message_id'],
+                    "created_at": user_message['created_at']
+                },
+                {
+                    "role": MessageRole.ASSISTANT.value,
+                    "content": ai_response["content"],
+                    "token_count": ai_response["token_count"],
+                    "message_id": assistant_message['message_id'],
+                    "created_at": assistant_message['created_at']
+                }
+            ]
             
-            updated_session = await self.chat_repo.update_chat_session(
-                user_id=user_id,
-                session_id=session_id,
-                message_count=session.get('message_count', 0) + 2,
-                total_tokens_all_branches=new_total_tokens,
-                active_branch_tokens=new_active_tokens
+            updated_context, total_tokens_after_ai = await self.chat_cache.append_messages(
+                session_id, new_messages, session_info
             )
             
-            logger.info(f"Message exchange completed for session: {session_id}")
-            return user_message, assistant_message, updated_session
+            # 6. Check if addition of AI response exceeds token limit
+            limit_message = None
+            if total_tokens_after_ai >= self.default_max_tokens:
+                limit_message = (
+                    f"🚫 Chat session has reached the maximum token limit ({self.default_max_tokens:,} tokens). "
+                    f"This session is now read-only. Please start a new chat session to continue the conversation."
+                )
+            
+            # UPDATED: Enhanced logging with more details
+            logger.info(f"Message exchange completed for session: {session_id}, "
+                    f"Total tokens: {total_tokens_after_ai:,}, "
+                    f"Messages in context: {len(updated_context)}, "
+                    f"At limit: {total_tokens_after_ai >= self.default_max_tokens}")
+            
+            return user_message, assistant_message, limit_message
             
         except HTTPException:
             raise
@@ -445,20 +472,10 @@ class ChatService:
         user_id: int,
         session_id: str,
         edit_data: EditMessageRequest
-    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Optional[str]]:
         """
         Edit a message and regenerate the conversation from that point.
-        
-        Args:
-            user_id: ID of the user
-            session_id: ID of the chat session
-            edit_data: Edit message data
-            
-        Returns:
-            Tuple of (edited_message, new_assistant_message, updated_session)
-            
-        Raises:
-            HTTPException: If message not found or edit fails
+        Enhanced with cache invalidation.
         """
         try:
             # Verify session exists and belongs to user
@@ -483,6 +500,9 @@ class ChatService:
                     detail="Only user messages can be edited"
                 )
             
+            # Invalidate cache since we're editing the conversation tree
+            await self.chat_cache.invalidate_session_cache(session_id)
+            
             # Deactivate all messages that come after this message in the branch
             await self.message_repo.deactivate_branch_messages(session_id, edit_data.message_id)
             
@@ -497,21 +517,14 @@ class ChatService:
                 token_count=new_token_count
             )
             
-            # Get data source info for context
-            data_source = await self.data_source_repo.get_data_source_by_id(session['data_source_id'])
-            data_source_info = {
-                "type": data_source.data_source_type.value if data_source else "unknown",
-                "name": data_source.data_source_name if data_source else "Unknown"
-            }
-            
-            # Get conversation history up to the edited message
-            conversation_history = await self._get_conversation_context(session_id, edit_data.message_id)
+            # Get updated context after edit (will rebuild cache)
+            context_messages, context_tokens, session_info = await self._get_context_with_tokens_cached(
+                session_id, session['data_source_id'], edit_data.message_id
+            )
             
             # Generate new AI response
-            ai_response = await self.llm_service.generate_response_with_context(
-                message=edit_data.new_content,
-                conversation_history=conversation_history,
-                data_source_info=data_source_info
+            ai_response = await self._generate_ai_response(
+                edit_data.new_content, context_messages, session_info
             )
             
             # Create new assistant message
@@ -525,19 +538,35 @@ class ChatService:
                 parent_message_id=edit_data.message_id
             )
             
-            # Update session statistics
-            new_total_tokens = await self.message_repo.calculate_total_session_tokens(session_id)
-            new_active_tokens = await self.message_repo.calculate_active_branch_tokens(session_id)
+            # Update cache with the new message
+            new_messages = [{
+                "role": MessageRole.ASSISTANT.value,
+                "content": ai_response["content"],
+                "token_count": ai_response["token_count"],
+                "message_id": new_assistant_message['message_id'],
+                "created_at": new_assistant_message['created_at']
+            }]
             
+            updated_context, total_tokens = await self.chat_cache.append_messages(
+                session_id, new_messages, session_info
+            )
+            
+            # Check token limit
+            limit_message = None
+            if total_tokens >= self.default_max_tokens:
+                limit_message = (
+                    "⚠️ Session token limit has been reached. "
+                    "Please start a new chat session to continue the conversation."
+                )
+            
+            # Update session
             updated_session = await self.chat_repo.update_chat_session(
                 user_id=user_id,
-                session_id=session_id,
-                total_tokens_all_branches=new_total_tokens,
-                active_branch_tokens=new_active_tokens
+                session_id=session_id
             )
             
             logger.info(f"Message edited and regenerated for session: {session_id}")
-            return edited_message, new_assistant_message, updated_session
+            return edited_message, new_assistant_message, updated_session, limit_message
             
         except HTTPException:
             raise
@@ -548,24 +577,8 @@ class ChatService:
                 detail="Failed to edit message"
             )
 
-    async def check_token_usage(
-        self,
-        user_id: int,
-        session_id: str
-    ) -> Dict[str, Any]:
-        """
-        Check token usage for a session and provide warnings if needed.
-        
-        Args:
-            user_id: ID of the user
-            session_id: ID of the chat session
-            
-        Returns:
-            Dict with token usage information
-            
-        Raises:
-            HTTPException: If session not found
-        """
+    async def get_session_token_status(self, user_id: int, session_id: str) -> Dict[str, Any]:
+        """Get detailed token usage information for a session."""
         try:
             session = await self.chat_repo.get_chat_session(user_id, session_id)
             if not session:
@@ -574,19 +587,51 @@ class ChatService:
                     detail="Chat session not found"
                 )
             
-            active_tokens = await self.message_repo.calculate_active_branch_tokens(session_id)
-            total_tokens = await self.message_repo.calculate_total_session_tokens(session_id)
-            
-            usage_percentage = active_tokens / self.default_max_tokens if self.default_max_tokens > 0 else 0
-            warning_needed = usage_percentage >= self.token_warning_threshold
+            token_info = await self.chat_cache.get_session_token_info(session_id)
             
             return {
-                "active_branch_tokens": active_tokens,
-                "total_session_tokens": total_tokens,
-                "max_tokens": self.default_max_tokens,
-                "usage_percentage": usage_percentage,
-                "warning_needed": warning_needed,
-                "tokens_remaining": self.default_max_tokens - active_tokens
+                "session_id": session_id,
+                "token_usage": token_info,
+                "message": "Token usage retrieved successfully"
+            }
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting token status for session {session_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get token status"
+            )
+
+    async def check_token_usage(
+        self,
+        user_id: int,
+        session_id: str
+    ) -> Dict[str, Any]:
+        """Check token usage for a session (updated for hard limits)."""
+        try:
+            session = await self.chat_repo.get_chat_session(user_id, session_id)
+            if not session:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Chat session not found"
+                )
+            
+            # CHANGED: Get comprehensive token info from cache
+            token_info = await self.chat_cache.get_session_token_info(session_id)
+            
+            return {
+                "session_id": session_id,
+                "total_tokens": token_info["total_tokens"],
+                "max_tokens": token_info["max_tokens"],
+                "tokens_remaining": token_info["tokens_remaining"],
+                "usage_percentage": token_info["usage_percentage"],
+                "message_count": token_info["message_count"],
+                "is_at_limit": token_info["is_at_limit"],
+                "can_send_messages": token_info["can_send_messages"],
+                "warning_needed": token_info["usage_percentage"] >= 0.8,  # 80% threshold
+                "status": self._get_session_status(token_info["usage_percentage"], token_info["is_at_limit"])
             }
             
         except HTTPException:
@@ -597,7 +642,77 @@ class ChatService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to check token usage"
             )
-    
+
+    async def _get_context_with_tokens_cached(
+        self, 
+        session_id: str,
+        data_source_id: int,
+        parent_message_id: Optional[str] = None
+    ) -> Tuple[List[Dict[str, Any]], int, Dict[str, Any]]:
+        """
+        Get context messages, tokens, and session info with intelligent caching.
+        """
+        try:
+            # Try cache first using ChatCacheService
+            context_messages, total_tokens, session_info = await self.chat_cache.get_session_data(session_id)
+            
+            if context_messages and session_info:
+                logger.debug(f"Cache hit for session {session_id}: {len(context_messages)} messages, "
+                            f"{total_tokens} tokens")
+                return context_messages, total_tokens, session_info
+            
+            # Cache miss - load from database
+            logger.debug(f"Cache miss for session {session_id}, loading from database")
+            
+            # Get conversation context
+            active_path = await self.message_repo.get_active_conversation_path(
+                session_id, parent_message_id
+            )
+            
+            # Get data source information
+            data_source = await self.data_source_repo.get_data_source_by_id(data_source_id)
+            
+            # Build session info with data source details
+            session_info = {
+                "data_source_id": data_source_id,
+                "data_source_name": data_source.data_source_name if data_source else "Unknown",
+                "data_source_type": data_source.data_source_type.value if data_source else "unknown",
+                "data_source_url": data_source.data_source_url if data_source else None,
+                "data_source_schema": data_source.data_source_schema if data_source else None
+            }
+            
+            # Build context messages
+            context_messages = []
+            total_tokens = 0
+            
+            for message in active_path:
+                msg_data = {
+                    "role": message['role'],
+                    "content": message['content'],
+                    "token_count": message['token_count'],
+                    "message_id": message['message_id'],
+                    "created_at": message['created_at']
+                }
+                context_messages.append(msg_data)
+                total_tokens += message['token_count']
+            
+            # Cache for future requests with token-based limits using ChatCacheService
+            await self.chat_cache.update_session_data(
+                session_id, context_messages, total_tokens, session_info
+            )
+            
+            # Get the potentially trimmed data
+            final_context, final_tokens, _ = await self.chat_cache.get_session_data(session_id)
+            
+            logger.debug(f"Loaded and cached session {session_id}: {len(final_context)} messages, "
+                        f"{final_tokens} tokens")
+            
+            return final_context, final_tokens, session_info
+            
+        except Exception as e:
+            logger.error(f"Error getting cached context: {e}")
+            return [], 0, {}
+
     def _build_conversation_tree(self, messages: List[Dict[str, Any]]) -> List[ConversationTree]:
         """
         Build a conversation tree from a list of messages.
@@ -656,40 +771,54 @@ class ChatService:
             tree.append(build_tree_node(root_message))
         
         return tree
-    
-    async def _get_conversation_context(
+
+    async def _generate_ai_response(
         self,
-        session_id: str,
-        up_to_message_id: str
-    ) -> List[Dict[str, Any]]:
+        user_message: str,
+        context_messages: List[Dict[str, Any]],
+        session_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
-        Get conversation history up to a specific message for LLM context.
-        
-        Args:
-            session_id: ID of the chat session
-            up_to_message_id: Get history up to this message ID
-            
-        Returns:
-            List of message dictionaries for LLM context
+        Generate AI response with context and cached data source information.
         """
         try:
-            # Get the active conversation path up to the specified message
-            active_path = await self.message_repo.get_active_conversation_path(
-                session_id, up_to_message_id
+            # Use cached data source info from session_info
+            data_source_info = {
+                "type": session_info.get("data_source_type", "unknown"),
+                "name": session_info.get("data_source_name", "Unknown"),
+                "url": session_info.get("data_source_url"),
+                "schema": session_info.get("data_source_schema")
+            }
+            
+            # Generate AI response
+            ai_response = await self.llm_service.generate_response_with_context(
+                message=user_message,
+                conversation_history=context_messages,
+                data_source_info=data_source_info
             )
             
-            # Convert to format suitable for LLM
-            context = []
-            for message in active_path[:-1]:  # Exclude the current message
-                context.append({
-                    "role": message['role'],
-                    "content": message['content'],
-                    "token_count": message['token_count']
-                })
-            
-            return context
+            return ai_response
             
         except Exception as e:
-            logger.error(f"Error getting conversation context: {e}")
-            return []
+            logger.error(f"Error generating AI response: {e}")
+            # Return minimal fallback response
+            fallback_content = "I understand your message, but I'm having trouble generating a detailed response right now."
+            return {
+                "content": fallback_content,
+                "token_count": self.llm_service.calculate_token_count(fallback_content),
+                "model": "fallback"
+            }
+
+    def _get_session_status(self, usage_percentage: float, is_at_limit: bool) -> str:
+        """Get human-readable session status based on token usage."""
+        if is_at_limit:
+            return "LIMIT_REACHED"
+        elif usage_percentage >= 0.9:
+            return "CRITICAL"
+        elif usage_percentage >= 0.8:
+            return "WARNING"
+        elif usage_percentage >= 0.5:
+            return "MODERATE"
+        else:
+            return "NORMAL"
 

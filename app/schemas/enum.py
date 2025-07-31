@@ -20,3 +20,4 @@ class ChatStatus(str, Enum):
     ACTIVE = "active"
     ARCHIVED = "archived"
     DELETED = "deleted"
+

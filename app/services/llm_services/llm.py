@@ -1,7 +1,7 @@
 import asyncio
 import random
 from typing import Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class MockLLMService:
@@ -148,7 +148,7 @@ class MockLLMService:
             "version": "1.0.0",
             "available_models": ["mock-llm-v1"],
             "max_tokens_per_request": 4000,
-            "timestamp": datetime.utcnow()
+            "timestamp": datetime.now(timezone.utc)
         }
 
 

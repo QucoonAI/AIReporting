@@ -1,9 +1,9 @@
 from datetime import datetime
 from fastapi import APIRouter, Depends, Query, HTTPException, status, BackgroundTasks
 from typing import Optional, Dict, Any
-from services.user import UserService
-from repositories.user import UserRepository
-from schemas.user import (
+from app.services.user import UserService
+from app.repositories.user import UserRepository
+from app.schemas.user import (
     UserCreateRequest, UserCreateResponse, UserUpdateRequest, UserUpdateResponse,
     VerifyUserRequest, VerifyUserConfirmRequest,
     ChangePasswordRequest, ChangePasswordConfirmRequest, PasswordResetRequest,
@@ -11,8 +11,8 @@ from schemas.user import (
     PasswordResetResponse, UserDeleteResponse, UserResponse,
     UserListResponse, UserSearchResponse, PaginationMetadata,
 )
-from core.dependencies import get_current_user, get_user_service, get_user_repo
-from core.utils import logger
+from app.core.dependencies import get_current_user, get_user_service, get_user_repo
+from app.core.utils import logger
 
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])

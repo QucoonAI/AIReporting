@@ -2,7 +2,7 @@ import uuid
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
-from core.utils import logger
+from app.core.utils import logger
 
 
 class ChatRepository:
@@ -302,7 +302,7 @@ class ChatRepository:
         except ClientError as e:
             logger.error(f"Error getting data source sessions for data source {data_source_id}: {e}")
             raise
-
+        
     # ===============================
     # Helper Methods
     # ===============================

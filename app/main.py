@@ -1,11 +1,11 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
-from config.redis import redis_manager
-from config.dynamodb import initialize_database, verify_database
-from core.exceptions import setup_exception_handling
-from core.utils import logger
-from routes import auth, user, data_source, chat
+from app.config.redis import redis_manager
+from app.config.dynamodb import initialize_database, verify_database
+from app.core.exceptions import setup_exception_handling
+from app.core.utils import logger
+from app.routes import auth, user, data_source, chat
 
 
 def create_application(lifespan=None):

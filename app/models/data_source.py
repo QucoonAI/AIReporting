@@ -1,9 +1,10 @@
 from . import *
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
-from sqlmodel import SQLModel, Field, Relationship
+from sqlmodel import SQLModel, Field, Relationship, JSON
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import func, UniqueConstraint
-from schemas.enum import DataSourceType
+from app.schemas.enum import DataSourceType
 
 
 class DataSource(SQLModel, table=True):
@@ -17,6 +18,7 @@ class DataSource(SQLModel, table=True):
     data_source_name: str = Field(max_length=255)
     data_source_type: DataSourceType
     data_source_url: str = Field(max_length=255, unique=True)
+    data_source_schema: Optional[Dict[str, Any]] = Field(default=None, sa_type=JSON)
     data_source_is_active: bool = Field(default=True, sa_column_kwargs={"server_default": "true"})
     data_source_created_at: datetime = Field(sa_column_kwargs={"server_default": func.now()})
     data_source_updated_at: datetime = Field(sa_column_kwargs={"server_default": func.now(), "onupdate": func.now()})

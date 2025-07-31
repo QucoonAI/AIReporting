@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from typing import Dict, Any
-from services.user import UserService
-from schemas.auth import (
+from app.services.user import UserService
+from app.schemas.auth import (
     LoginRequest, LoginResponse, RefreshTokenRequest, RefreshTokenResponse,
     LogoutResponse, SessionsResponse, RevokeSessionRequest, RevokeSessionResponse
 )
-from core.dependencies import get_current_user, get_user_service
-from core.utils import logger
+from app.core.dependencies import get_current_user, get_user_service
+from app.core.utils import logger
 
 
 router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])

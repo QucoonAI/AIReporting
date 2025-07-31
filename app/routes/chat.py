@@ -1,16 +1,16 @@
 from fastapi import APIRouter, Depends, Query, HTTPException, status, Path
 from typing import Optional, Dict, Any
-from services.chat import ChatService
-from schemas.chat import (
+from app.services.chat import ChatService
+from app.schemas.chat import (
     ChatSessionCreateRequest, ChatSessionCreateResponse, ChatSessionUpdateRequest,
     ChatSessionUpdateResponse, ChatSessionDeleteResponse, ChatSessionListResponse,
     ChatSessionDetailResponse, ChatMessageRequest, ChatMessageResponse,
-    EditMessageRequest, EditMessageResponse, ChatSessionResponse,
+    ChatSessionResponse,
     ChatSessionPaginatedListResponse, PaginationMetadata,
     MessageResponse, MessageRole
 )
-from core.dependencies import get_current_user, get_chat_service
-from core.utils import logger
+from app.core.dependencies import get_current_user, get_chat_service
+from app.core.utils import logger
 
 
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
@@ -331,7 +331,7 @@ async def send_message(
     Returns both the user message and AI response.
     """
     try:
-        user_message, assistant_message, updated_session = await chat_service.send_message(
+        user_message, assistant_message, limit_message = await chat_service.send_message(
             user_id=current_user["user_id"],
             session_id=session_id,
             message_data=message_data
@@ -363,20 +363,10 @@ async def send_message(
             created_at=assistant_message["created_at"]
         )
         
-        session_response = ChatSessionResponse(
-            session_id=updated_session["session_id"],
-            user_id=updated_session["user_id"],
-            data_source_id=updated_session["data_source_id"],
-            title=updated_session["title"],
-            created_at=updated_session["created_at"],
-            updated_at=updated_session["updated_at"]
-        )
-        
         return ChatMessageResponse(
             message="Message sent successfully",
             user_message=user_message_response,
             assistant_message=assistant_message_response,
-            session=session_response
         )
     except HTTPException:
         raise
@@ -386,86 +376,4 @@ async def send_message(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred while sending the message"
         )
-
-
-@router.put(
-    "/sessions/{session_id}/messages/edit",
-    response_model=EditMessageResponse,
-    summary="Edit a message and regenerate response",
-    description="Edit a user message and regenerate the AI response from that point."
-)
-async def edit_message(
-    session_id: str = Path(..., description="ID of the chat session"),
-    edit_data: EditMessageRequest = ...,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    chat_service: ChatService = Depends(get_chat_service)
-) -> EditMessageResponse:
-    """
-    Edit a message and regenerate the conversation.
-    
-    - **session_id**: ID of the chat session
-    - **message_id**: ID of the message to edit (must be a user message)
-    - **new_content**: New content for the message
-    
-    This will edit the specified message and regenerate the AI response, creating a new conversation branch.
-    """
-    try:
-        edited_message, new_assistant_message, updated_session = await chat_service.edit_message(
-            user_id=current_user["user_id"],
-            session_id=session_id,
-            edit_data=edit_data
-        )
-        
-        edited_message_response = MessageResponse(
-            message_id=edited_message.message_id,
-            session_id=edited_message.session_id,
-            user_id=edited_message.user_id,
-            role=MessageRole(edited_message.role),
-            content=edited_message.content,
-            message_index=edited_message.message_index,
-            parent_message_id=edited_message.parent_message_id,
-            token_count=edited_message.token_count,
-            is_active=edited_message.is_active,
-            created_at=edited_message.created_at
-        )
-        
-        new_assistant_message_response = MessageResponse(
-            message_id=new_assistant_message.message_id,
-            session_id=new_assistant_message.session_id,
-            user_id=new_assistant_message.user_id,
-            role=MessageRole(new_assistant_message.role),
-            content=new_assistant_message.content,
-            message_index=new_assistant_message.message_index,
-            parent_message_id=new_assistant_message.parent_message_id,
-            token_count=new_assistant_message.token_count,
-            is_active=new_assistant_message.is_active,
-            created_at=new_assistant_message.created_at
-        )
-        
-        session_response = ChatSessionResponse(
-            ssession_id=updated_session["session_id"],
-            user_id=updated_session["user_id"],
-            data_source_id=updated_session["data_source_id"],
-            title=updated_session["title"],
-            created_at=updated_session["created_at"],
-            updated_at=updated_session["updated_at"]
-        )
-        
-        return EditMessageResponse(
-            message="Message edited and response regenerated successfully",
-            edited_message=edited_message_response,
-            new_assistant_message=new_assistant_message_response,
-            session=session_response
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error editing message: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while editing the message"
-        )
-
-
-
 

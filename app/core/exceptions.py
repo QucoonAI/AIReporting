@@ -10,7 +10,7 @@ from sqlalchemy.exc import (
 from pydantic import ValidationError
 import redis.exceptions as redis_exceptions
 import jwt.exceptions as jwt_exceptions
-from core.utils import logger
+from .utils import logger
 
 
 class ErrorResponse:

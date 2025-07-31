@@ -1,8 +1,8 @@
 from typing import Optional, List, Dict, Any, Tuple
 from sqlmodel import select, func, or_, and_
 from datetime import datetime
-from models import User, UserProfile
-from config.database import SessionDep
+from app.models import User, UserProfile
+from app.config.database import SessionDep
 
 
 class UserRepository:

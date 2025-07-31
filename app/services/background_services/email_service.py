@@ -1,6 +1,6 @@
 import sendgrid
 from sendgrid.helpers.mail import Mail, Email, To, Content
-from config.settings import Settings, get_settings
+from app.config.settings import Settings, get_settings
 
 
 settings = get_settings()

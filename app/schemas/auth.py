@@ -1,12 +1,10 @@
 from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, List
 from datetime import datetime
-from .user import UserResponse
 
 class LoginRequest(BaseModel):
     user_email: EmailStr
     user_password: str
-    device_info: Optional[str] = None
     
     @field_validator('user_password')
     def validate_password(cls, v):
@@ -21,7 +19,6 @@ class LoginResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
-    # user: 'UserResponse'
 
 
 class RefreshTokenRequest(BaseModel):

@@ -2,8 +2,8 @@ import uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
-from schemas.chat import MessageRole
-from core.utils import logger
+from app.schemas.chat import MessageRole
+from app.core.utils import logger
 
 
 class MessageRepository:

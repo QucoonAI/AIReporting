@@ -1,11 +1,11 @@
 from typing import List, Optional, Tuple
 from sqlmodel import select, func, and_, or_
-from datetime import datetime
-from models.data_source import DataSource
-from schemas.data_source import DataSourceUpdateRequest
-from schemas.enum import DataSourceType
-from config.database import SessionDep
-from core.utils import logger
+from datetime import datetime, timezone
+from app.models.data_source import DataSource
+from app.schemas.data_source import DataSourceUpdateRequest
+from app.schemas.enum import DataSourceType
+from app.config.database import SessionDep
+from app.core.utils import logger
 
 
 class DataSourceRepository:
@@ -71,7 +71,7 @@ class DataSourceRepository:
                 data_source.data_source_url = update_data.data_source_url
             
             # Update timestamp
-            data_source.data_source_updated_at = datetime.utcnow()
+            data_source.data_source_updated_at = datetime.now(timezone.utc)
             
             self.session.add(data_source)
             await self.session.commit()

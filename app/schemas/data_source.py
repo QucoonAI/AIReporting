@@ -2,7 +2,7 @@ import re
 from datetime import datetime
 from typing import Optional, List, Union
 from pydantic import BaseModel, Field, field_validator, model_validator, FileUrl, PostgresDsn, MySQLDsn, MongoDsn
-from schemas.enum import DataSourceType
+from .enum import DataSourceType
 
 
 class DataSourceUrlValidator:

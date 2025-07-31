@@ -1,8 +1,8 @@
 from typing import Optional, List, Dict, Any
 from fastapi import HTTPException, status
-from repositories.message import MessageRepository
-from repositories.chat import ChatRepository
-from core.utils import logger
+from app.repositories.message import MessageRepository
+from app.repositories.chat import ChatRepository
+from app.core.utils import logger
 
 
 class MessageService:

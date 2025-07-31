@@ -3,9 +3,9 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 import boto3
 from botocore.exceptions import ClientError
-from config.settings import get_settings
-from core.utils import logger
-from tables import chat, message
+from .settings import get_settings
+from app.core.utils import logger
+from app.tables import chat, message
 
 
 settings = get_settings()

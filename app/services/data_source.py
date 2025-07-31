@@ -3,15 +3,22 @@ import uuid
 from typing import Optional
 from botocore.exceptions import ClientError
 from fastapi import UploadFile, HTTPException, status
-from repositories.data_source import DataSourceRepository
-from schemas.data_source import DataSourceCreateRequest, DataSourceUpdateRequest
-from schemas.enum import DataSourceType
-from models.data_source import DataSource
-from config.settings import get_settings
-from core.utils import logger
-from core.exceptions import (
+from app.repositories.data_source import DataSourceRepository
+from app.schemas.data_source import DataSourceCreateRequest, DataSourceUpdateRequest
+from app.schemas.enum import DataSourceType
+from app.models.data_source import DataSource
+from app.config.settings import get_settings
+from app.core.utils import logger
+from app.core.exceptions import (
     DataSourceNotFoundError,
     DataSourceLimitExceededError
+)
+from .schema_extractors import (
+    csv as csv_extractor,
+    xlsx as xlsx_extractor,
+    mssql as mssql_extractor,
+    mysql as mysql_extractor,
+    postgres as postgres_extractor,
 )
 
 
@@ -168,6 +175,15 @@ class DataSourceService:
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"File is required for {data_source_data.data_source_type.value} data source"
                     )
+                if data_source_data.data_source_type.value == 'csv':
+                    json_schema = await csv_extractor.extract_csv_schema(upload_file=file)
+                elif data_source_data.data_source_type.value == 'xlsx':
+                    json_schema = await xlsx_extractor.extract_xlsx_schema(upload_file=file)
+                elif data_source_data.data_source_type.value == 'pdf':
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"PDF file can't be processed yet."
+                    )
                 
                 # Upload file to S3 and get URL
                 data_source_url = await self._upload_file_to_s3(
@@ -176,12 +192,35 @@ class DataSourceService:
                     data_source_name=data_source_data.data_source_name
                 )
             
+            if data_source_data.data_source_type.value == 'postgres':
+                json_schema = await postgres_extractor.extract_postgres_schema_async(connection_string=str(data_source_url))
+            elif data_source_data.data_source_type.value == 'mssql':
+                json_schema = mssql_extractor.extract_mssql_schema(connection_string=str(data_source_url))
+            elif data_source_data.data_source_type.value == 'mysql':
+                json_schema = mysql_extractor.extract_mysql_schema_from_string(connection_string=str(data_source_url))
+            elif data_source_data.data_source_type.value == 'google':
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Google sheet can't be processed yet."
+                )
+            elif data_source_data.data_source_type.value == 'oracle':
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Oracle database can't be processed yet."
+                )
+            elif data_source_data.data_source_type.value == 'mongodb':
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"MongoDB database can't be processed yet."
+                )
+            
             # Create the data source
             data_source = DataSource(
                 data_source_user_id=user_id,
                 data_source_name=data_source_data.data_source_name,
                 data_source_type=data_source_data.data_source_type,
-                data_source_url=str(data_source_url)
+                data_source_url=str(data_source_url),
+                data_source_schema=json_schema,
             )
             
             created_data_source = await self.data_source_repo.create_data_source(data_source)

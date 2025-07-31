@@ -117,7 +117,6 @@ class ChatMessageResponse(BaseModel):
     message: str
     user_message: MessageResponse
     assistant_message: MessageResponse
-    session: ChatSessionResponse
 
 
 class EditMessageResponse(BaseModel):

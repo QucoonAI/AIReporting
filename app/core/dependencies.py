@@ -1,21 +1,20 @@
 from typing import Dict, Any
-
 import boto3
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from config.database import SessionDep
-from config.redis import redis_manager
-from config.settings import get_settings
-from services.redis import AsyncRedisService
-from services.email_service import EmailService
-from services.user import UserService
-from services.data_source import DataSourceService
-from services.chat import ChatService
-from services.llm import MockLLMService
-from repositories.user import UserRepository
-from repositories.data_source import DataSourceRepository
-from repositories.chat import ChatRepository
-from repositories.message import MessageRepository
+from app.config.database import SessionDep
+from app.config.redis import redis_manager
+from app.config.settings import get_settings
+from app.services.redis_managers.factory import RedisServiceFactory
+from app.services.background_services.email_service import EmailService
+from app.services.user import UserService
+from app.services.data_source import DataSourceService
+from app.services.chat import ChatService
+from app.services.llm_services.llm import MockLLMService
+from app.repositories.user import UserRepository
+from app.repositories.data_source import DataSourceRepository
+from app.repositories.chat import ChatRepository
+from app.repositories.message import MessageRepository
 
 
 security = HTTPBearer()
@@ -41,21 +40,21 @@ def get_message_repo() -> MessageRepository:
 
 
 
-def get_redis_service() -> AsyncRedisService:
-    return AsyncRedisService(redis_client=redis_manager.get_client())
+def get_redis_factory_service() -> RedisServiceFactory:
+    return RedisServiceFactory(redis_client=redis_manager.get_client())
 
 def get_email_service() -> EmailService:
     return EmailService(settings)
 
 def get_user_service(
     db_session: SessionDep = SessionDep, # type: ignore
-    redis_service: AsyncRedisService = Depends(get_redis_service),
-    email_service: EmailService = Depends(get_email_service)
-) -> UserService: # type: ignore
+    email_service: EmailService = Depends(get_email_service),
+    redis_factory: RedisServiceFactory = Depends(get_redis_factory_service),
+) -> UserService:
     return UserService(
         db_session=db_session,
-        redis_service=redis_service,
-        email_service=email_service
+        email_service=email_service,
+        redis_factory=redis_factory,
     )
 
 def get_data_source_service(
@@ -72,14 +71,16 @@ def get_chat_service(
     chat_repo: ChatRepository = Depends(get_chat_repo),
     message_repo: MessageRepository = Depends(get_message_repo),
     data_source_repo: DataSourceRepository = Depends(get_data_source_repo),
-    llm_service: MockLLMService = Depends(get_llm_service)
+    llm_service: MockLLMService = Depends(get_llm_service),
+    redis_factory: RedisServiceFactory = Depends(get_redis_factory_service),
 ) -> ChatService:
     """Dependency to get ChatService instance"""
-    return ChatService(chat_repo, message_repo, data_source_repo, llm_service)
+    return ChatService(chat_repo, message_repo, data_source_repo, llm_service, redis_factory)
+
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
-    redis_service = Depends(get_redis_service)
+    redis_factory = Depends(get_redis_factory_service)
 ) -> Dict[str, Any]:
     """
     Get current authenticated user from access token.
@@ -87,7 +88,7 @@ async def get_current_user(
     """
     try:
         token = credentials.credentials
-        payload = await redis_service.verify_token(token, "access")
+        payload = await redis_factory.auth_service.verify_token(token, "access")
         return {
             "user_id": int(payload["sub"]),
             "session_id": payload["session_id"],
@@ -103,7 +104,6 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-
 def require_roles(required_roles: list):
     """
     Dependency factory to require specific roles.
@@ -118,6 +118,4 @@ def require_roles(required_roles: list):
             )
         return current_user
     return role_checker
-
-
 
