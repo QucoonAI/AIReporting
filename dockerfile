@@ -26,6 +26,15 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
 
 FROM public.ecr.aws/lambda/python:3.13
 
+RUN microdnf update -y && \
+    microdnf install -y unixODBC git && \
+    curl https://packages.microsoft.com/config/rhel/8/prod.repo > /etc/yum.repos.d/mssql-release.repo && \
+    ACCEPT_EULA=Y microdnf install -y msodbcsql17 mssql-tools unixODBC-devel gcc-c++ && \
+    microdnf clean all
+
+# Add MSSQL tools to PATH
+ENV PATH="${PATH}:/opt/mssql-tools/bin"
+
 # Copy the runtime dependencies from the builder stage.
 COPY --from=builder ${LAMBDA_TASK_ROOT} ${LAMBDA_TASK_ROOT}
 

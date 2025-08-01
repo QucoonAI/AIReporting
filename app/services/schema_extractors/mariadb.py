@@ -5,17 +5,18 @@ import logging
 import urllib.parse
 
 
-class MySQLSchemaExtractor:
+class MariaDBSchemaExtractor:
     """
-    Extracts schema information from MySQL databases using SQLAlchemy async.
+    Extracts schema information from MariaDB databases using SQLAlchemy async.
+    MariaDB is largely compatible with MySQL but has some specific features and optimizations.
     """
     
     def __init__(self, connection_string: str, sample_data_limit: int = 100):
         """
-        Initialize the MySQL schema extractor.
+        Initialize the MariaDB schema extractor.
         
         Args:
-            connection_string: MySQL connection string with mysql+aiomysql:// scheme
+            connection_string: MariaDB connection string with mysql+aiomysql:// or mariadb+aiomysql:// scheme
             sample_data_limit: Maximum number of sample values to extract per column
         """
         self.connection_string = self._convert_to_async_connection_string(connection_string)
@@ -24,8 +25,11 @@ class MySQLSchemaExtractor:
         self.logger = logging.getLogger(__name__)
     
     def _convert_to_async_connection_string(self, connection_string: str) -> str:
-        """Convert MySQL connection string to async SQLAlchemy format"""
-        if connection_string.startswith('mysql://'):
+        """Convert MariaDB connection string to async SQLAlchemy format"""
+        if connection_string.startswith('mariadb://'):
+            # Convert mariadb:// to mysql+aiomysql:// (MariaDB uses MySQL protocol)
+            return connection_string.replace('mariadb://', 'mysql+aiomysql://', 1)
+        elif connection_string.startswith('mysql://'):
             # Convert mysql:// to mysql+aiomysql://
             return connection_string.replace('mysql://', 'mysql+aiomysql://', 1)
         elif connection_string.startswith('mysql+aiomysql://'):
@@ -56,11 +60,15 @@ class MySQLSchemaExtractor:
         
         try:
             async with self.engine.connect() as conn:
+                # Check MariaDB version for feature compatibility
+                mariadb_version = await self._get_mariadb_version(conn)
+                self.logger.info(f"Connected to MariaDB version: {mariadb_version}")
+                
                 table_names = await self._get_table_names(conn, database_name)
                 
                 for table_name in table_names:
                     self.logger.info(f"Analyzing table: {database_name}.{table_name}")
-                    table_schema = await self._analyze_table(conn, database_name, table_name, **kwargs)
+                    table_schema = await self._analyze_table(conn, database_name, table_name, mariadb_version, **kwargs)
                     if table_schema:
                         tables.append(table_schema)
                         
@@ -78,6 +86,15 @@ class MySQLSchemaExtractor:
         except Exception:
             return None
     
+    async def _get_mariadb_version(self, conn: AsyncConnection) -> str:
+        """Get MariaDB version information"""
+        try:
+            result = await conn.execute(text("SELECT VERSION() as version"))
+            version_info = result.fetchone()
+            return version_info[0] if version_info else "Unknown"
+        except Exception:
+            return "Unknown"
+    
     async def _get_table_names(self, conn: AsyncConnection, database_name: str) -> List[str]:
         """Get all table names in the specified database."""
         query = text("""
@@ -90,7 +107,7 @@ class MySQLSchemaExtractor:
         result = await conn.execute(query, {"database_name": database_name})
         return [row[0] for row in result.fetchall()]
     
-    async def _analyze_table(self, conn: AsyncConnection, database_name: str, table_name: str, **kwargs) -> Dict[str, Any]:
+    async def _analyze_table(self, conn: AsyncConnection, database_name: str, table_name: str, mariadb_version: str, **kwargs) -> Dict[str, Any]:
         """
         Analyze a single table and extract its complete schema information.
         
@@ -98,6 +115,7 @@ class MySQLSchemaExtractor:
             conn: Database connection
             database_name: Database name
             table_name: Table name
+            mariadb_version: MariaDB version for feature detection
             **kwargs: Additional analysis options
             
         Returns:
@@ -105,12 +123,15 @@ class MySQLSchemaExtractor:
         """
         try:
             # Get basic table info
-            columns = await self._get_column_info(conn, database_name, table_name)
+            columns = await self._get_column_info(conn, database_name, table_name, mariadb_version)
             
             # Get constraints and relationships
             primary_keys = await self._get_primary_keys(conn, database_name, table_name)
             foreign_keys = await self._get_foreign_keys(conn, database_name, table_name)
             indexes = await self._get_indexes(conn, database_name, table_name)
+            
+            # Get MariaDB-specific features
+            check_constraints = await self._get_check_constraints(conn, database_name, table_name, mariadb_version)
             
             # Enhance columns with additional metadata
             for column in columns:
@@ -124,6 +145,9 @@ class MySQLSchemaExtractor:
                 
                 # Check if column has unique constraint
                 column['is_unique'] = await self._is_unique(conn, database_name, table_name, column_name)
+                
+                # Check for virtual/computed columns (MariaDB 5.2+)
+                column['is_virtual'] = await self._is_virtual_column(conn, database_name, table_name, column_name, mariadb_version)
                 
                 # Get sample data if requested
                 if kwargs.get('include_sample_data', True):
@@ -141,17 +165,20 @@ class MySQLSchemaExtractor:
                 'primary_keys': primary_keys,
                 'foreign_keys': foreign_keys,
                 'indexes': indexes,
+                'check_constraints': check_constraints,
                 'row_count': await self._get_row_count(conn, database_name, table_name),
-                'table_info': await self._get_table_info(conn, database_name, table_name)
+                'table_info': await self._get_table_info(conn, database_name, table_name),
+                'mariadb_version': mariadb_version
             }
             
         except Exception as e:
             self.logger.error(f"Error analyzing table {database_name}.{table_name}: {e}")
             return None
     
-    async def _get_column_info(self, conn: AsyncConnection, database_name: str, table_name: str) -> List[Dict[str, Any]]:
-        """Get detailed column information for a table."""
-        query = text("""
+    async def _get_column_info(self, conn: AsyncConnection, database_name: str, table_name: str, mariadb_version: str) -> List[Dict[str, Any]]:
+        """Get detailed column information for a table with MariaDB-specific features."""
+        # Base query that works for all MariaDB versions
+        base_query = """
             SELECT 
                 c.COLUMN_NAME as column_name,
                 c.DATA_TYPE as data_type,
@@ -164,7 +191,23 @@ class MySQLSchemaExtractor:
                 c.ORDINAL_POSITION as ordinal_position,
                 c.COLUMN_KEY as column_key,
                 c.EXTRA as extra,
-                c.COLUMN_COMMENT as column_comment
+                c.COLUMN_COMMENT as column_comment,
+                c.COLLATION_NAME as collation_name
+        """
+        
+        # Add MariaDB-specific columns if version supports them
+        if "10." in mariadb_version:  # MariaDB 10.x has more features
+            extended_query = base_query + """,
+                c.GENERATION_EXPRESSION as generation_expression,
+                c.IS_GENERATED as is_generated
+            """
+        else:
+            extended_query = base_query + """,
+                NULL as generation_expression,
+                'NEVER' as is_generated
+            """
+        
+        query = text(extended_query + """
             FROM INFORMATION_SCHEMA.COLUMNS c
             WHERE c.TABLE_SCHEMA = :database_name AND c.TABLE_NAME = :table_name
             ORDER BY c.ORDINAL_POSITION
@@ -235,7 +278,8 @@ class MySQLSchemaExtractor:
                         'Seq_in_index': row[3],
                         'Collation': row[5] if len(row) > 5 else None,
                         'Cardinality': row[6] if len(row) > 6 else None,
-                        'Index_type': row[10] if len(row) > 10 else 'BTREE'
+                        'Index_type': row[10] if len(row) > 10 else 'BTREE',
+                        'Comment': row[11] if len(row) > 11 else None
                     }
                 
                 index_name = row_dict['Key_name']
@@ -244,7 +288,8 @@ class MySQLSchemaExtractor:
                         'index_name': index_name,
                         'is_unique': row_dict['Non_unique'] == 0,
                         'columns': [],
-                        'index_type': row_dict.get('Index_type', 'BTREE')
+                        'index_type': row_dict.get('Index_type', 'BTREE'),
+                        'comment': row_dict.get('Comment', '')
                     }
                 
                 indexes_dict[index_name]['columns'].append({
@@ -264,6 +309,32 @@ class MySQLSchemaExtractor:
             
         except Exception as e:
             self.logger.warning(f"Could not get indexes for {table_name}: {e}")
+            return []
+    
+    async def _get_check_constraints(self, conn: AsyncConnection, database_name: str, table_name: str, mariadb_version: str) -> List[Dict[str, Any]]:
+        """Get check constraints (MariaDB 10.2+)."""
+        # Check constraints are supported from MariaDB 10.2+
+        if not mariadb_version.startswith('10.') or mariadb_version < '10.2':
+            return []
+        
+        query = text("""
+            SELECT 
+                cc.CONSTRAINT_NAME as constraint_name,
+                cc.CHECK_CLAUSE as check_clause
+            FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS cc
+            JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc 
+                ON cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+                AND cc.CONSTRAINT_SCHEMA = tc.TABLE_SCHEMA
+            WHERE tc.TABLE_SCHEMA = :database_name 
+                AND tc.TABLE_NAME = :table_name
+                AND tc.CONSTRAINT_TYPE = 'CHECK'
+        """)
+        
+        try:
+            result = await conn.execute(query, {"database_name": database_name, "table_name": table_name})
+            return [dict(row._mapping) for row in result.fetchall()]
+        except Exception as e:
+            self.logger.warning(f"Could not get check constraints for {table_name}: {e}")
             return []
     
     async def _is_primary_key(self, conn: AsyncConnection, database_name: str, table_name: str, column_name: str) -> bool:
@@ -326,9 +397,34 @@ class MySQLSchemaExtractor:
         })
         return result.scalar() > 0
     
+    async def _is_virtual_column(self, conn: AsyncConnection, database_name: str, table_name: str, column_name: str, mariadb_version: str) -> bool:
+        """Check if a column is virtual/computed (MariaDB 5.2+)."""
+        # Virtual columns supported from MariaDB 5.2+
+        if mariadb_version < '5.2':
+            return False
+        
+        try:
+            query = text("""
+                SELECT IS_GENERATED
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = :database_name 
+                    AND TABLE_NAME = :table_name 
+                    AND COLUMN_NAME = :column_name
+            """)
+            
+            result = await conn.execute(query, {
+                "database_name": database_name, 
+                "table_name": table_name, 
+                "column_name": column_name
+            })
+            row = result.fetchone()
+            return row and row[0] != 'NEVER'
+        except Exception:
+            return False
+    
     async def _get_sample_data(self, conn: AsyncConnection, database_name: str, table_name: str, column_name: str) -> List[str]:
         """Get sample data for a column."""
-        # Use backticks for MySQL identifier quoting
+        # Use backticks for MariaDB identifier quoting
         query_str = f'''
             SELECT `{column_name}` 
             FROM `{database_name}`.`{table_name}` 
@@ -345,7 +441,7 @@ class MySQLSchemaExtractor:
     
     async def _get_column_statistics(self, conn: AsyncConnection, database_name: str, table_name: str, column_name: str) -> Dict[str, Any]:
         """Get basic statistics for a column."""
-        # Use backticks for MySQL identifier quoting
+        # Use backticks for MariaDB identifier quoting
         query_str = f'''
             SELECT 
                 COUNT(*) as total_count,
@@ -403,7 +499,7 @@ class MySQLSchemaExtractor:
             return 0
     
     async def _get_table_info(self, conn: AsyncConnection, database_name: str, table_name: str) -> Dict[str, Any]:
-        """Get additional table information."""
+        """Get additional table information with MariaDB-specific features."""
         query = text("""
             SELECT 
                 ENGINE,
@@ -413,7 +509,10 @@ class MySQLSchemaExtractor:
                 UPDATE_TIME,
                 TABLE_ROWS,
                 DATA_LENGTH,
-                INDEX_LENGTH
+                INDEX_LENGTH,
+                AUTO_INCREMENT,
+                ROW_FORMAT,
+                TABLE_TYPE
             FROM INFORMATION_SCHEMA.TABLES
             WHERE TABLE_SCHEMA = :database_name AND TABLE_NAME = :table_name
         """)
@@ -431,7 +530,10 @@ class MySQLSchemaExtractor:
                     'update_time': row[4],
                     'estimated_rows': row[5],
                     'data_length': row[6],
-                    'index_length': row[7]
+                    'index_length': row[7],
+                    'auto_increment': row[8],
+                    'row_format': row[9],
+                    'table_type': row[10]
                 }
         except Exception as e:
             self.logger.warning(f"Could not get table info for {database_name}.{table_name}: {e}")
@@ -453,13 +555,13 @@ class MySQLSchemaExtractor:
 
 # Usage example:
 async def main():
-    """Example usage of the MySQLSchemaExtractor."""
+    """Example usage of the MariaDBSchemaExtractor."""
     # Replace with your actual connection string
-    connection_string = "mysql://user:password@localhost:3306/ecommerce_db"
+    connection_string = "mariadb://user:password@localhost:3306/ecommerce_db"
     
     try:
-        async with MySQLSchemaExtractor(connection_string, sample_data_limit=10) as extractor:
-            print("Extracting MySQL schema information...")
+        async with MariaDBSchemaExtractor(connection_string, sample_data_limit=10) as extractor:
+            print("Extracting MariaDB schema information...")
             
             schema = await extractor.extract_schema(
                 database_name='ecommerce_db',  # Optional if in connection string
@@ -472,16 +574,19 @@ async def main():
             for table in schema:
                 print(f"🗃️  Table: {table['table_name']}")
                 print(f"   Database: {table['database_name']}")
+                print(f"   MariaDB Version: {table['mariadb_version']}")
                 print(f"   Rows: {table['row_count']:,}")
                 print(f"   Columns: {len(table['columns'])}")
                 print(f"   Primary Keys: {table['primary_keys']}")
                 print(f"   Foreign Keys: {len(table['foreign_keys'])}")
                 print(f"   Indexes: {len(table['indexes'])}")
+                print(f"   Check Constraints: {len(table['check_constraints'])}")
                 
                 # Show table info
                 if table['table_info']:
                     info = table['table_info']
                     print(f"   Engine: {info.get('engine', 'Unknown')}")
+                    print(f"   Row Format: {info.get('row_format', 'Unknown')}")
                     if info.get('comment'):
                         print(f"   Comment: {info['comment']}")
                 
@@ -492,6 +597,7 @@ async def main():
                     if col.get('is_primary_key'): flags.append('PK')
                     if col.get('is_foreign_key'): flags.append('FK')
                     if col.get('is_unique'): flags.append('UNIQUE')
+                    if col.get('is_virtual'): flags.append('VIRTUAL')
                     if col.get('extra') and 'auto_increment' in col.get('extra', '').lower(): 
                         flags.append('AUTO_INCREMENT')
                     
@@ -500,6 +606,10 @@ async def main():
                     
                     col_type = col['column_type'] or col['data_type']
                     print(f"      • {col['column_name']}: {col_type} {nullable}{flag_str}")
+                    
+                    # Show generation expression for virtual columns
+                    if col.get('generation_expression'):
+                        print(f"        Generated: {col['generation_expression']}")
                     
                     # Show sample data if available
                     if col.get('sample_values'):
@@ -519,6 +629,12 @@ async def main():
                     for fk in table['foreign_keys'][:3]:  # Show first 3 foreign keys
                         print(f"      • {fk['column_name']} → {fk['referenced_table_name']}.{fk['referenced_column_name']}")
                 
+                # Show check constraints if any
+                if table['check_constraints']:
+                    print("   ✅ Check Constraints:")
+                    for cc in table['check_constraints'][:2]:  # Show first 2 check constraints
+                        print(f"      • {cc['constraint_name']}: {cc['check_clause']}")
+                
                 print()  # Empty line between tables
                 
     except Exception as e:
@@ -526,4 +642,6 @@ async def main():
         return 1
     
     return 0
+
+
 

@@ -2,11 +2,12 @@ import base64
 import boto3
 import uuid
 import json
-from typing import Optional, Dict, Any
+from datetime import datetime
+from typing import Optional, Dict, Any, List
 from botocore.exceptions import ClientError
 from fastapi import UploadFile, HTTPException, status
 from app.repositories.data_source import DataSourceRepository
-from app.schemas.data_source import DataSourceCreateRequest, DataSourceUpdateRequest
+from app.schemas.data_source import DataSourceUpdateRequest
 from app.schemas.enum import DataSourceType
 from app.models.data_source import DataSource
 from app.config.settings import get_settings
@@ -16,13 +17,13 @@ from app.core.exceptions import (
     DataSourceLimitExceededError
 )
 from .redis_managers.factory import RedisServiceFactory
-from .schema_extractors.factory import SchemaExtractorFactory
-from .schema_extractors import DataSourceSchema
 from .llm_services.ai_function import AIQuery
+from .extractor import ExtactorService
 
 
 settings = get_settings()
 llm = AIQuery()
+extractor = ExtactorService()
 
 class DataSourceService:
     """Service class for handling DataSource business logic."""
@@ -37,49 +38,24 @@ class DataSourceService:
         'pdf': ['application/pdf']
     }
 
-    SUPPORTED_EXTRACTORS = SchemaExtractorFactory.get_supported_types()
 
-    def __init__(self, data_source_repo: DataSourceRepository, redis_factory: RedisServiceFactory):
+    def __init__(
+        self,
+        data_source_repo: DataSourceRepository,
+        redis_factory: RedisServiceFactory
+    ):
         self.data_source_repo = data_source_repo
         self.redis_factory = redis_factory
         self.temp_data_service = redis_factory.temp_data_service
-        self._initialize_s3_client()
-
-        # Update supported types from factory
-        self.SUPPORTED_TYPES = set(SchemaExtractorFactory.get_supported_types())
-        
-        # Update existing type sets to use supported types
-        self.FILE_BASED_TYPES = {'csv', 'xlsx'} & self.SUPPORTED_TYPES
-        self.DATABASE_TYPES = {'postgres', 'mssql', 'mysql'} & self.SUPPORTED_TYPES
-        
-    def _initialize_s3_client(self) -> None:
-        """Initialize S3 client and validate configuration."""
-        session = boto3.Session(
-                aws_access_key_id=settings.ACCESS_KEY_ID,
-                aws_secret_access_key=settings.SECRET_ACCESS_KEY
-            )
-        s3 = boto3.resource('s3')
-        self.s3_bucket_resource = s3.Bucket(settings.S3_BUCKET_NAME)
         self.s3_client = boto3.client('s3')
         self.s3_bucket = settings.S3_BUCKET_NAME
         
-        if not self.s3_bucket:
-            logger.error("AWS_S3_BUCKET environment variable not set")
-            raise ValueError("S3 bucket configuration missing")
+        self.FILE_BASED_TYPES = {'csv', 'xlsx'}
+        self.DATABASE_TYPES = {'postgres', 'mysql'}
+        
+
 
     async def download_file_from_s3(self, file_key: str) -> bytes:
-        """
-        Download file content from S3.
-        
-        Args:
-            file_key: S3 object key
-            
-        Returns:
-            File content as bytes
-            
-        Raises:
-            HTTPException: If download fails
-        """
         try:
             response = self.s3_client.get_object(
                 Bucket=self.s3_bucket,
@@ -123,7 +99,10 @@ class DataSourceService:
         if file.content_type and file_extension in self.ALLOWED_EXTENSIONS:
             allowed_types = self.ALLOWED_EXTENSIONS[file_extension]
             if file.content_type not in allowed_types:
-                logger.warning(f"Content type mismatch: {file.content_type} for {file_extension}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Content type mismatch: {file.content_type} for {file_extension}"
+                )
 
     def _get_file_extension(self, filename: Optional[str]) -> str:
         """Extract file extension from filename."""
@@ -172,7 +151,8 @@ class DataSourceService:
             s3_key = self._generate_s3_key(user_id, data_source_name, file_extension)
             
             # Upload to S3
-            self.s3_bucket_resource.put_object(
+            self.s3_client.put_object(
+                Bucket=self.s3_bucket,
                 Key=s3_key,
                 Body=file_content,
                 ContentType=file.content_type or 'application/octet-stream',
@@ -203,120 +183,6 @@ class DataSourceService:
                 detail="File upload failed"
             )
 
-    async def _extract_schema_from_file(
-        self, 
-        data_source_type: str, 
-        file: Optional[UploadFile] = None,
-        file_content: Optional[bytes] = None
-    ) -> Dict[str, Any]:
-        """
-        Extract schema from file-based data sources using unified extractors.
-        
-        Args:
-            data_source_type: Type of data source
-            file: Upload file object (for creation)
-            file_content: File content bytes (for refresh)
-            
-        Returns:
-            Extracted schema as dictionary
-            
-        Raises:
-            HTTPException: If extraction fails
-        """
-        try:
-            extractor = SchemaExtractorFactory.get_extractor(data_source_type)
-            
-            if data_source_type == 'csv':
-                if file:
-                    # print('yes')
-                    schema = await extractor.extract_schema(file)
-                elif file_content:
-                    # Create a mock UploadFile from bytes for CSV
-                    import io
-                    from fastapi import UploadFile
-                    mock_file = UploadFile(
-                        filename="data.csv",
-                        file=io.BytesIO(file_content),
-                        content_type="text/csv"
-                    )
-                    schema = await extractor.extract_schema(mock_file)
-                else:
-                    raise ValueError("Either file or file_content must be provided")
-                    
-            elif data_source_type == 'xlsx':
-                if file:
-                    schema = await extractor.extract_schema(file)
-                elif file_content:
-                    # Create a mock UploadFile from bytes for XLSX
-                    import io
-                    from fastapi import UploadFile
-                    mock_file = UploadFile(
-                        filename="data.xlsx",
-                        file=io.BytesIO(file_content),
-                        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                    schema = await extractor.extract_schema(mock_file)
-                else:
-                    raise ValueError("Either file or file_content must be provided")
-                    
-            elif data_source_type == 'pdf':
-                raise HTTPException(
-                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                    detail="PDF processing is not implemented yet"
-                )
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Unsupported file-based data source type: {data_source_type}"
-                )
-            
-            # Convert DataSourceSchema to dictionary
-            return schema.to_json()
-            
-        except Exception as e:
-            logger.error(f"Schema extraction failed for {data_source_type}: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to extract schema from {data_source_type} file"
-            )
-
-    async def _extract_schema_from_database(self, data_source_type: str, connection_string: str) -> Dict[str, Any]:
-        """
-        Extract schema from database connections using unified extractors.
-        
-        Args:
-            data_source_type: Type of database
-            connection_string: Database connection string
-            
-        Returns:
-            Extracted schema as dictionary
-            
-        Raises:
-            HTTPException: If extraction fails
-        """
-        try:
-            extractor = SchemaExtractorFactory.get_extractor(data_source_type)
-            
-            if data_source_type == 'postgres':
-                schema = await extractor.extract_schema(connection_string, schema_name='public')
-            elif data_source_type in ['mysql']:
-                schema = await extractor.extract_schema(connection_string)
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Unsupported database type: {data_source_type}"
-                )
-            
-            # Convert DataSourceSchema to dictionary
-            return schema.to_dict()
-            
-        except Exception as e:
-            logger.error(f"Database schema extraction failed for {data_source_type}: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to extract schema from {data_source_type} database"
-            )
-
     def _get_llm_prompt_from_schema(self, schema_dict: Dict[str, Any]) -> Any:
         """
         Convert schema dictionary to LLM-friendly prompt.
@@ -336,36 +202,6 @@ class DataSourceService:
         except Exception as e:
             logger.error(f"Failed to generate LLM prompt from schema: {e}")
             return "Schema information unavailable"
-
-    async def _extract_schema(
-        self, 
-        data_source_type: str, 
-        data_source_url: str,
-        file: Optional[UploadFile] = None
-    ) -> Dict[str, Any]:
-        """
-        Extract schema based on data source type.
-        
-        Args:
-            data_source_type: Type of data source
-            data_source_url: URL or connection string
-            file: Optional file for file-based sources
-            
-        Returns:
-            Extracted schema
-            
-        Raises:
-            HTTPException: If extraction fails or type is unsupported
-        """
-        if data_source_type in self.FILE_BASED_TYPES:
-            return await self._extract_schema_from_file(data_source_type, file=file)
-        elif data_source_type in self.DATABASE_TYPES:
-            return await self._extract_schema_from_database(data_source_type, data_source_url)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail=f"{data_source_type.title()} integration is not implemented yet"
-            )
 
     async def _validate_user_limits(self, user_id: int) -> None:
         """
@@ -402,74 +238,6 @@ class DataSourceService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Data source with name '{name}' already exists"
-            )
-
-    async def create_data_source(
-        self, 
-        user_id: int, 
-        data_source_data: DataSourceCreateRequest,
-        file: Optional[UploadFile] = None
-    ) -> DataSource:
-        """
-        Create a new data source for a user.
-        
-        Args:
-            user_id: ID of the user creating the data source
-            data_source_data: Data source creation data
-            file: Optional uploaded file for file-based data sources
-            
-        Returns:
-            Created DataSource object
-            
-        Raises:
-            DataSourceLimitExceededError: If user has reached the maximum limit
-            HTTPException: If validation fails or creation fails
-        """
-        try:
-            # Validate user limits and name uniqueness
-            await self._validate_user_limits(user_id)
-            await self._validate_unique_name(user_id, data_source_data.data_source_name)
-            
-            data_source_type = data_source_data.data_source_type.value
-            data_source_url = data_source_data.data_source_url
-            
-            # Handle file upload for file-based data sources
-            if data_source_type in self.FILE_BASED_TYPES:
-                if not file:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"File is required for {data_source_type} data source"
-                    )
-                data_source_url = await self._upload_file_to_s3(
-                    file=file,
-                    user_id=user_id,
-                    data_source_name=data_source_data.data_source_name
-                )
-            
-            # Extract schema
-            json_schema = await self._extract_schema(data_source_type, data_source_url, file)
-            
-            # Create the data source
-            data_source = DataSource(
-                data_source_user_id=user_id,
-                data_source_name=data_source_data.data_source_name,
-                data_source_type=data_source_data.data_source_type,
-                data_source_url=str(data_source_url),
-                data_source_schema=json_schema,
-            )
-            
-            created_data_source = await self.data_source_repo.create_data_source(data_source)
-            logger.info(f"Data source created successfully: {created_data_source.data_source_id}")
-            
-            return created_data_source
-            
-        except (DataSourceLimitExceededError, HTTPException):
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error creating data source: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to create data source"
             )
 
     async def update_data_source(
@@ -631,17 +399,7 @@ class DataSourceService:
 
     async def refresh_data_source_schema(self, data_source_id: int) -> DataSource:
         """
-        Refresh the schema of an existing data source by re-extracting it.
-        
-        Args:
-            data_source_id: ID of the data source to refresh
-            
-        Returns:
-            Updated DataSource object with refreshed schema
-            
-        Raises:
-            DataSourceNotFoundError: If data source not found
-            HTTPException: If schema extraction fails
+        Enhanced refresh method with support for all database types.
         """
         try:
             # Get the existing data source
@@ -671,6 +429,7 @@ class DataSourceService:
                 )
                 
             elif data_source_type in self.DATABASE_TYPES:
+                # Use enhanced database extraction with proper connection management
                 json_schema = await self._extract_schema_from_database(data_source_type, data_source_url)
                 
             else:
@@ -685,10 +444,16 @@ class DataSourceService:
                     detail="Failed to extract schema from data source"
                 )
             
+            # Preserve user-added descriptions from existing schema
+            enhanced_schema = self._preserve_user_descriptions(
+                new_schema=json_schema,
+                existing_schema=existing_data_source.data_source_schema
+            )
+            
             # Update the data source with new schema
             updated_data_source = await self.data_source_repo.refresh_data_source_schema(
                 data_source_id=data_source_id,
-                new_schema=json_schema
+                new_schema=enhanced_schema
             )
             
             logger.info(f"Data source schema refreshed successfully: {data_source_id}")
@@ -703,32 +468,68 @@ class DataSourceService:
                 detail="Failed to refresh data source schema"
             )
 
-    async def get_data_source_llm_description(self, data_source_id: int) -> str:
+    def _preserve_user_descriptions(
+        self, 
+        new_schema: Dict[str, Any], 
+        existing_schema: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
-        Get LLM-friendly description of a data source.
+        Preserve user-added descriptions when refreshing schema.
         
         Args:
-            data_source_id: ID of the data source
+            new_schema: Newly extracted schema
+            existing_schema: Current schema with user descriptions
             
         Returns:
-            LLM-optimized description string
-            
-        Raises:
-            DataSourceNotFoundError: If data source not found
+            New schema with preserved user descriptions
         """
         try:
-            data_source = await self.get_data_source_by_id(data_source_id)
-            return self._get_llm_prompt_from_schema(data_source.data_source_schema)
-        except DataSourceNotFoundError:
-            raise
+            import copy
+            enhanced_schema = copy.deepcopy(new_schema)
+            
+            if not existing_schema or "tables" not in existing_schema:
+                return enhanced_schema
+            
+            # Create lookup maps for existing descriptions
+            existing_table_descriptions = {}
+            existing_column_descriptions = {}
+            
+            for table in existing_schema.get("tables", []):
+                table_name = table.get("name")
+                if table_name and table.get("description"):
+                    existing_table_descriptions[table_name] = table["description"]
+                
+                existing_column_descriptions[table_name] = {}
+                for column in table.get("columns", []):
+                    col_name = column.get("name")
+                    if col_name and column.get("description"):
+                        existing_column_descriptions[table_name][col_name] = column["description"]
+            
+            # Apply preserved descriptions to new schema
+            for table in enhanced_schema.get("tables", []):
+                table_name = table.get("name")
+                if table_name in existing_table_descriptions:
+                    table["description"] = existing_table_descriptions[table_name]
+                
+                if table_name in existing_column_descriptions:
+                    for column in table.get("columns", []):
+                        col_name = column.get("name")
+                        if col_name in existing_column_descriptions[table_name]:
+                            column["description"] = existing_column_descriptions[table_name][col_name]
+            
+            # Update metadata
+            if "metadata" not in enhanced_schema:
+                enhanced_schema["metadata"] = {}
+            
+            enhanced_schema["metadata"]["descriptions_preserved"] = True
+            enhanced_schema["metadata"]["refresh_timestamp"] = datetime.now().isoformat()
+            
+            return enhanced_schema
+            
         except Exception as e:
-            logger.error(f"Error generating LLM description for data source {data_source_id}: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to generate data source description"
-            )
+            logger.error(f"Error preserving user descriptions: {e}")
+            return new_schema
 
-    
     async def upload_and_extract_schema(
         self, 
         user_id: int, 
@@ -738,21 +539,7 @@ class DataSourceService:
         file: Optional[UploadFile] = None
     ) -> Dict[str, Any]:
         """
-        Extract schema from file or database without uploading file to S3.
-        For file-based sources, stores file temporarily in Redis.
-        
-        Args:
-            user_id: ID of the user uploading
-            data_source_name: Name of the data source
-            data_source_type: Type of data source
-            data_source_url: URL for database connections
-            file: Optional uploaded file for file-based sources
-            
-        Returns:
-            Dictionary containing schema and metadata for user review
-            
-        Raises:
-            HTTPException: If validation or extraction fails
+        Enhanced schema extraction with support for all database types.
         """
         try:
             # Validate user limits and name uniqueness
@@ -762,6 +549,7 @@ class DataSourceService:
             json_schema = None
             final_url = data_source_url
             temp_file_identifier = None
+            file_content = None
             
             # Handle file-based data sources
             if data_source_type in self.FILE_BASED_TYPES:
@@ -770,63 +558,68 @@ class DataSourceService:
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"File is required for {data_source_type} data source"
                     )
+                raise HTTPException(
+                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                    detail=f"{data_source_type.title()} integration is not implemented yet"
+                )
                 
-                # Validate file without uploading to S3
-                file_content = await file.read()
-                self._validate_file(file, file_content)
+                # # Validate file without uploading to S3
+                # file_content = await file.read()
+                # self._validate_file(file, file_content)
                 
-                # Store file temporarily in Redis
-                if self.temp_data_service:
-                    temp_file_identifier = f"{user_id}_{data_source_name}_{uuid.uuid4().hex}"
+                # # Store file temporarily in Redis
+                # if self.temp_data_service:
+                #     temp_file_identifier = f"{user_id}_{data_source_name}_{uuid.uuid4().hex}"
                     
-                    # Prepare file data for Redis storage
-                    temp_file_data = {
-                        "filename": file.filename,
-                        "content_type": file.content_type,
-                        "content": base64.b64encode(file_content).decode('utf-8'),
-                        "user_id": user_id,
-                        "data_source_name": data_source_name,
-                        "data_source_type": data_source_type,
-                        "size": len(file_content)
-                    }
+                #     temp_file_data = {
+                #         "filename": file.filename,
+                #         "content_type": file.content_type,
+                #         "content": base64.b64encode(file_content).decode('utf-8'),
+                #         "user_id": user_id,
+                #         "data_source_name": data_source_name,
+                #         "data_source_type": data_source_type,
+                #         "size": len(file_content)
+                #     }
                     
-                    # Store in Redis with 30-minute expiry
-                    await self.temp_data_service.store_temp_data(
-                        operation="file_upload_extract",
-                        identifier=temp_file_identifier,
-                        data=temp_file_data,
-                        expiry_minutes=30
-                    )
-                    
-                    logger.info(f"File stored temporarily in Redis: {temp_file_identifier}")
+                #     await self.temp_data_service.store_temp_data(
+                #         operation="file_upload_extract",
+                #         identifier=temp_file_identifier,
+                #         data=temp_file_data,
+                #         expiry_minutes=30
+                #     )
                 
-                # Reset file pointer for schema extraction
-                await file.seek(0)
+                # # Reset file pointer for schema extraction
+                # await file.seek(0)
+                # json_schema = await self._extract_schema_from_file(data_source_type, file=file)
                 
-                # Extract schema directly from uploaded file
-                json_schema = await self._extract_schema_from_file(data_source_type, file=file)
+                # # Generate placeholder URL
+                # file_extension = self._get_file_extension(file.filename)
+                # final_url = f"pending_upload://{data_source_name}_{uuid.uuid4().hex}.{file_extension}"
                 
-                # Generate placeholder URL
-                file_extension = self._get_file_extension(file.filename)
-                final_url = f"pending_upload://{data_source_name}_{uuid.uuid4().hex}.{file_extension}"
-                
-            # Handle database connections
+            # Handle database connections with enhanced support
             elif data_source_type in self.DATABASE_TYPES:
-                json_schema = await self._extract_schema_from_database(data_source_type, data_source_url)
+                json_schema = await extractor._extract_schema_from_database(data_source_type, data_source_url)
                 final_url = data_source_url
+                
             else:
                 raise HTTPException(
                     status_code=status.HTTP_501_NOT_IMPLEMENTED,
                     detail=f"{data_source_type.title()} integration is not implemented yet"
                 )
             
+            # Generate LLM description
+            llm_description = self._get_llm_prompt_from_schema(json_schema)
+            
+            # Convert to UI-friendly format
+            tables_for_ui = self._convert_schema_for_ui(json_schema)
+            
             # Prepare response data
             result = {
                 "data_source_name": data_source_name,
                 "data_source_type": data_source_type,
                 "data_source_url": final_url,
-                "extracted_schema": json_schema,
-                "llm_description": self._get_llm_prompt_from_schema(json_schema)
+                "tables": tables_for_ui,
+                "llm_description": json.dumps(llm_description)
             }
             
             # Add file metadata and temp identifier for file-based sources
@@ -851,6 +644,89 @@ class DataSourceService:
                 detail="Failed to extract schema from data source"
             )
 
+    def _convert_schema_for_ui(self, schema_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Convert internal schema to UI-friendly format
+        
+        Args:
+            schema_dict: Internal schema dictionary
+            
+        Returns:
+            List of table dictionaries for UI display
+        """
+        try:
+            # Reconstruct DataSourceSchema from dictionary
+            from .schema_extractors import DataSourceSchema
+            schema = DataSourceSchema.from_dict(schema_dict)
+            
+            tables_for_ui = []
+            for table in schema.tables:
+                table_dict = {
+                    "name": table.name,
+                    "row_count": table.row_count,
+                    "table_type": table.table_type,
+                    "description": table.description or "",
+                    "primary_keys": table.primary_keys or [],
+                    "columns": []
+                }
+                
+                for col in table.columns:
+                    col_dict = {
+                        "name": col.name,
+                        "data_type": col.data_type.value,
+                        "original_type": col.original_type,
+                        "is_nullable": col.is_nullable,
+                        "is_primary_key": col.is_primary_key,
+                        "is_foreign_key": col.is_foreign_key,
+                        "is_unique": col.is_unique,
+                        "sample_values": col.sample_values or [],
+                        "description": col.description or "",
+                        "value_count": col.value_count,
+                        "null_count": col.null_count,
+                        "unique_count": col.unique_count,
+                        "constraints": col.constraints or []
+                    }
+                    
+                    # Add numeric statistics if available
+                    if col.min_value is not None:
+                        col_dict["min_value"] = col.min_value
+                    if col.max_value is not None:
+                        col_dict["max_value"] = col.max_value
+                    if col.avg_value is not None:
+                        col_dict["avg_value"] = col.avg_value
+                    
+                    # Add text statistics if available
+                    if col.min_length is not None:
+                        col_dict["min_length"] = col.min_length
+                    if col.max_length is not None:
+                        col_dict["max_length"] = col.max_length
+                    if col.avg_length is not None:
+                        col_dict["avg_length"] = col.avg_length
+                    
+                    # Add foreign key reference if available
+                    if col.references_table:
+                        col_dict["references_table"] = col.references_table
+                    if col.references_column:
+                        col_dict["references_column"] = col.references_column
+                    
+                    table_dict["columns"].append(col_dict)
+                
+                # Add foreign keys information
+                if table.foreign_keys:
+                    table_dict["foreign_keys"] = table.foreign_keys
+                
+                # Add indexes information
+                if table.indexes:
+                    table_dict["indexes"] = table.indexes
+                
+                tables_for_ui.append(table_dict)
+            
+            return tables_for_ui
+            
+        except Exception as e:
+            logger.error(f"Error converting schema for UI: {e}")
+            return []
+    
     async def create_data_source_with_schema(
         self, 
         user_id: int, 
@@ -858,6 +734,8 @@ class DataSourceService:
         data_source_type: DataSourceType,
         data_source_url: str,
         final_schema: Dict[str, Any],
+        table_descriptions: Optional[Dict[str, str]] = None,
+        column_descriptions: Optional[Dict[str, Dict[str, str]]] = None,
         temp_file_identifier: Optional[str] = None
     ) -> DataSource:
         """
@@ -870,6 +748,8 @@ class DataSourceService:
             data_source_type: Type of data source (enum)
             data_source_url: URL of the data source (or pending_upload:// for files)
             final_schema: Final schema approved by user (with descriptions)
+            table_descriptions: User-added table descriptions
+            column_descriptions: User-added column descriptions
             temp_file_identifier: Identifier for temporarily stored file
             
         Returns:
@@ -882,6 +762,13 @@ class DataSourceService:
             # Re-validate user limits and name uniqueness (in case time passed)
             await self._validate_user_limits(user_id)
             await self._validate_unique_name(user_id, data_source_name)
+            
+            # Apply user modifications to schema
+            enhanced_schema = self._apply_user_modifications(
+                final_schema, 
+                table_descriptions, 
+                column_descriptions
+            )
             
             actual_url = data_source_url
             
@@ -954,18 +841,22 @@ class DataSourceService:
                 data_source_name=data_source_name,
                 data_source_type=data_source_type,
                 data_source_url=actual_url,
-                data_source_schema=final_schema,
+                data_source_schema=enhanced_schema,
             )
             
             created_data_source = await self.data_source_repo.create_data_source(data_source)
             
             # Clean up temporary file from Redis
             if temp_file_identifier and self.temp_data_service:
-                await self.temp_data_service.delete_temp_data(
-                    operation="file_upload_extract",
-                    identifier=temp_file_identifier
-                )
-                logger.info(f"Cleaned up temporary file: {temp_file_identifier}")
+                try:
+                    await self.temp_data_service.delete_temp_data(
+                        operation="file_upload_extract",
+                        identifier=temp_file_identifier
+                    )
+                    logger.info(f"Cleaned up temporary file: {temp_file_identifier}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to cleanup temporary file: {cleanup_error}")
+                    # Don't fail the whole operation for cleanup errors
             
             logger.info(f"Data source created successfully: {created_data_source.data_source_id}")
             return created_data_source
@@ -988,4 +879,72 @@ class DataSourceService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to create data source"
             )
+
+    def _apply_user_modifications(
+        self, 
+        base_schema: Dict[str, Any],
+        table_descriptions: Optional[Dict[str, str]] = None,
+        column_descriptions: Optional[Dict[str, Dict[str, str]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Apply user-provided descriptions to the schema
+        
+        Args:
+            base_schema: Original extracted schema
+            table_descriptions: Dict mapping table names to descriptions
+            column_descriptions: Dict mapping table names to column description dicts
+            
+        Returns:
+            Enhanced schema with user modifications
+        """
+        try:
+            # Make a deep copy to avoid modifying original
+            import copy
+            enhanced_schema = copy.deepcopy(base_schema)
+            
+            # Apply table descriptions
+            if table_descriptions and "tables" in enhanced_schema:
+                for table in enhanced_schema["tables"]:
+                    table_name = table.get("name")
+                    if table_name and table_name in table_descriptions:
+                        # Update the table description
+                        table["description"] = table_descriptions[table_name]
+            
+            # Apply column descriptions
+            if column_descriptions and "tables" in enhanced_schema:
+                for table in enhanced_schema["tables"]:
+                    table_name = table.get("name")
+                    if table_name and table_name in column_descriptions:
+                        table_col_descriptions = column_descriptions[table_name]
+                        
+                        for column in table.get("columns", []):
+                            col_name = column.get("name")
+                            if col_name and col_name in table_col_descriptions:
+                                # Update the column description
+                                column["description"] = table_col_descriptions[col_name]
+            
+            # Update metadata to indicate user modifications
+            if "metadata" not in enhanced_schema:
+                enhanced_schema["metadata"] = {}
+            
+            enhanced_schema["metadata"]["user_modified"] = True
+            enhanced_schema["metadata"]["modification_timestamp"] = datetime.now().isoformat()
+            
+            # Track what was modified
+            modifications = {}
+            if table_descriptions:
+                modifications["table_descriptions_added"] = len(table_descriptions)
+            if column_descriptions:
+                total_col_desc = sum(len(cols) for cols in column_descriptions.values())
+                modifications["column_descriptions_added"] = total_col_desc
+            
+            enhanced_schema["metadata"]["modifications_applied"] = modifications
+            
+            return enhanced_schema
+            
+        except Exception as e:
+            logger.error(f"Error applying user modifications: {e}")
+            # Return original schema if modification fails
+            return base_schema
+
 

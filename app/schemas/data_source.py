@@ -221,15 +221,23 @@ class DataSourcePaginatedListResponse(BaseModel):
     data_sources: List[DataSourceResponse]
     pagination: PaginationMetadata
 
+
+class TableSchemaResponse(BaseModel):
+    """Schema representation for a single table/sheet"""
+    name: str
+    columns: List[Dict[str, Any]]
+    row_count: Optional[int] = None
+    table_type: str = "table"
+    description: Optional[str] = None
+
 class DataSourceSchemaExtractionResponse(BaseModel):
     """Response model for schema extraction endpoint"""
     message: str
     data_source_name: str
     data_source_type: str
     data_source_url: str
-    # extracted_schema: Dict[str, Any] = Field(..., description="Extracted schema from the data source")
-    extracted_schema: str = Field(..., description="Extracted schema from the data source")
-    llm_description: Any = Field(..., description="LLM-optimized description of the schema")
+    tables: List[TableSchemaResponse] = Field(..., description="Table schemas for UI display")
+    llm_description: str = Field(..., description="LLM-optimized description of the schema")
     file_metadata: Optional[Dict[str, Any]] = Field(None, description="Metadata about uploaded file")
     temp_file_identifier: Optional[str] = Field(None, description="Redis-based temporary file identifier")
 
@@ -241,9 +249,10 @@ class DataSourceCreateWithSchemaRequest(BaseModel):
     data_source_name: str
     data_source_type: DataSourceType
     data_source_url: str
-    final_schema: Dict[str, Any]  # User-approved schema with descriptions
-    temp_file_identifier: Optional[str] = None  # Reference to Redis-stored file
+    final_schema: Dict[str, Any]  # Complete schema structure
+    table_descriptions: Optional[Dict[str, str]] = None  # User-added table descriptions
+    column_descriptions: Optional[Dict[str, Dict[str, str]]] = None  # User-added column descriptions
+    temp_file_identifier: Optional[str] = None
 
     class Config:
         from_attributes = True
-

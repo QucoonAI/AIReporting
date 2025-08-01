@@ -1,21 +1,25 @@
 from typing import List
 from . import BaseSchemaExtractor
-from .csv import CSVSchemaExtractor
-from .xlsx import XLSXSchemaExtractor
+# from .csv import CSVSchemaExtractor
+# from .xlsx import XLSXSchemaExtractor
 from .postgres import PostgresSchemaExtractor
 from .mysql import MySQLSchemaExtractor
-# from .mssql import MSSQLSchemaExtractor
+from .mssql import MSSQLSchemaExtractor
+from .mariadb import MariaDBSchemaExtractor
+from .oracle import OracleSchemaExtractor
 
 
 class SchemaExtractorFactory:
     """Factory for creating appropriate schema extractors"""
     
     _extractors = {
-        'csv': CSVSchemaExtractor,
-        'xlsx': XLSXSchemaExtractor,
+        # 'csv': CSVSchemaExtractor,
+        # 'xlsx': XLSXSchemaExtractor,
         'postgres': PostgresSchemaExtractor,
         'mysql': MySQLSchemaExtractor,
-        # 'mssql': MSSQLSchemaExtractor,
+        'mssql': MSSQLSchemaExtractor,
+        'mariadb': MariaDBSchemaExtractor,
+        'oracle': OracleSchemaExtractor,
     }
     
     @classmethod
