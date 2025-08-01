@@ -192,3 +192,57 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+
+# =============================================
+# TERRAFORM SPECIFIC EXCLUDES
+# =============================================
+
+# Override files (used for local customizations)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform modules (if you want modules to be downloaded fresh)
+# Uncomment next line if you don't want to commit downloaded modules
+# .terraform/modules/
+
+# =============================================
+# CI/CD AND AUTOMATION
+# =============================================
+
+# GitHub Actions secrets
+.github/secrets/
+
+# Jenkins
+.jenkins/
+
+# Local scripts that might contain secrets
+run-local.sh
+deploy-local.sh
+setup-local.*
+
+# Terraform state files - contain sensitive data and resource metadata
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Terraform variable files with sensitive values
+*.tfvars
+*.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+
+# =============================================
+# TERRAFORM WORKING DIRECTORIES & CACHES
+# =============================================
+
+# Terraform working directory
+.terraform/
+.terraform.lock.hcl
+
+# Terraform plan files (may contain sensitive data)
+*.tfplan
+*.tfplan.*
+tfplan*

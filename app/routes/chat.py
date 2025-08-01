@@ -331,23 +331,10 @@ async def send_message(
     Returns both the user message and AI response.
     """
     try:
-        user_message, assistant_message, limit_message = await chat_service.send_message(
+        assistant_message, limit_message = await chat_service.send_message(
             user_id=current_user["user_id"],
             session_id=session_id,
             message_data=message_data
-        )
-        
-        user_message_response = MessageResponse(
-            message_id=user_message["message_id"],
-            session_id=user_message["session_id"],
-            user_id=user_message["user_id"],
-            role=MessageRole.USER,
-            content=user_message["content"],
-            message_index=user_message["message_index"],
-            parent_message_id=user_message["parent_message_id"],
-            token_count=user_message["token_count"],
-            is_active=user_message["is_active"],
-            created_at=user_message["created_at"]
         )
         
         assistant_message_response = MessageResponse(
@@ -365,8 +352,8 @@ async def send_message(
         
         return ChatMessageResponse(
             message="Message sent successfully",
-            user_message=user_message_response,
             assistant_message=assistant_message_response,
+            limit_message=limit_message
         )
     except HTTPException:
         raise

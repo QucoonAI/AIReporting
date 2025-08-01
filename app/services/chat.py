@@ -1,9 +1,11 @@
+import json
 from typing import Optional, List, Dict, Any, Tuple
 from fastapi import HTTPException, status
 from app.repositories.chat import ChatRepository
 from app.repositories.message import MessageRepository
 from app.repositories.data_source import DataSourceRepository
 from app.services.llm_services.llm import MockLLMService
+from app.services.llm_services.ai_function import AIQuery
 from .redis_managers.factory import RedisServiceFactory
 from app.schemas.chat import (
     ChatSessionCreateRequest, ChatSessionUpdateRequest, ChatMessageRequest,
@@ -11,6 +13,8 @@ from app.schemas.chat import (
 )
 from app.core.utils import logger
 
+
+agent = AIQuery()
 
 class ChatService:
     """Service class for handling chat operations"""
@@ -343,7 +347,7 @@ class ChatService:
         user_id: int,
         session_id: str,
         message_data: ChatMessageRequest
-    ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Optional[str]]:
+    ) -> Tuple[Dict[str, Any], Optional[str]]:
         """
         Send message following the specified algorithm with ChatCacheService.
         
@@ -368,7 +372,7 @@ class ChatService:
                 )
             
             # 2.1 Token check
-            user_token_count = self.llm_service.calculate_token_count(message_data.content)
+            user_token_count = agent.token_count(message_data.content)
             
             # 2.2 Get context messages, tokens, and session info (cache-first)
             context_messages, context_token_count, session_info = await self._get_context_with_tokens_cached(
@@ -414,7 +418,7 @@ class ChatService:
                 session_id=session_id,
                 user_id=user_id,
                 role=MessageRole.ASSISTANT,
-                content=ai_response["content"],
+                content=json.dumps(ai_response),
                 token_count=ai_response["token_count"],
                 message_index=next_index + 1,
                 parent_message_id=user_message['message_id']
@@ -456,7 +460,7 @@ class ChatService:
                     f"Messages in context: {len(updated_context)}, "
                     f"At limit: {total_tokens_after_ai >= self.default_max_tokens}")
             
-            return user_message, assistant_message, limit_message
+            return assistant_message, limit_message
             
         except HTTPException:
             raise
@@ -790,12 +794,24 @@ class ChatService:
                 "schema": session_info.get("data_source_schema")
             }
             
-            # Generate AI response
-            ai_response = await self.llm_service.generate_response_with_context(
-                message=user_message,
-                conversation_history=context_messages,
-                data_source_info=data_source_info
-            )
+            db_creds = session_info.get("data_source_url") # database connection string (str)
+            message = user_message # user message (str)
+            memory = json.dumps(context_messages) # chat context (str)
+
+            initial_response = await agent.initial_processor(message, memory)
+            json_extractor = await agent.agentic_call(initial_response, db_creds)
+            final_response = await agent.final_processor(message, json_extractor)
+            ai_response = {
+                "response_type": json_extractor[0],
+                "response": final_response[1]
+            }
+
+            # # Generate AI response
+            # ai_response = await self.llm_service.generate_response_with_context(
+            #     message=user_message,
+            #     conversation_history=context_messages,
+            #     data_source_info=data_source_info
+            # )
             
             return ai_response
             
@@ -803,11 +819,10 @@ class ChatService:
             logger.error(f"Error generating AI response: {e}")
             # Return minimal fallback response
             fallback_content = "I understand your message, but I'm having trouble generating a detailed response right now."
-            return {
-                "content": fallback_content,
-                "token_count": self.llm_service.calculate_token_count(fallback_content),
-                "model": "fallback"
-            }
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=fallback_content
+            )
 
     def _get_session_status(self, usage_percentage: float, is_at_limit: bool) -> str:
         """Get human-readable session status based on token usage."""

@@ -2,15 +2,21 @@ import uuid
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
+from boto3.dynamodb.conditions import Key, Attr
 from app.core.utils import logger
+from app.config.dynamodb import get_dynamodb_connection
+from app.config.settings import get_settings
 
+
+settings = get_settings()
 
 class ChatRepository:
-    """Repository class for handling Chat and Message DynamoDB operations."""
+    """Repository class for handling Chat DynamoDB operations."""
     
-    def __init__(self, dynamodb_client):
-        self.dynamodb = dynamodb_client
-        self.chat_table_name = 'ChatSessions'
+    def __init__(self):
+        """Initialize the chat repository with DynamoDB connection."""
+        self.db_connection = get_dynamodb_connection()
+        self.chat_sessions_table = self.db_connection.get_table(settings.DYNAMODB_CHAT_SESSIONS_TABLE)
 
     async def create_chat_session(
         self,
@@ -37,27 +43,22 @@ class ChatRepository:
             now = datetime.now(timezone.utc).isoformat()
             
             item = {
-                'pk': {'S': f"USER#{user_id}"},
-                'sk': {'S': f"SESSION#{session_id}"},
-                'gsi1_pk': {'S': f"DATASOURCE#{data_source_id}"},
-                'gsi1_sk': {'S': f"SESSION#{session_id}"},
-                'session_id': {'S': session_id},
-                'user_id': {'N': str(user_id)},
-                'data_source_id': {'N': str(data_source_id)},
-                'title': {'S': title},
-                'created_at': {'S': now},
-                'updated_at': {'S': now}
+                'pk': f"USER#{user_id}",
+                'sk': f"SESSION#{session_id}",
+                'gsi1_pk': f"DATASOURCE#{data_source_id}",
+                'gsi1_sk': f"SESSION#{session_id}",
+                'session_id': session_id,
+                'user_id': user_id,
+                'data_source_id': data_source_id,
+                'title': title,
+                'created_at': now,
+                'updated_at': now
             }
             
-            self.dynamodb.put_item(
-                TableName=self.chat_table_name,
-                Item=item
-            )
+            self.chat_sessions_table.put_item(Item=item)
             
-            # Convert back to dict for return
-            session = self._deserialize_chat_session(item)
             logger.info(f"Chat session created successfully: {session_id}")
-            return session
+            return item
             
         except ClientError as e:
             logger.error(f"Error creating chat session: {e}")
@@ -78,18 +79,14 @@ class ChatRepository:
             Chat session dict if found, None otherwise
         """
         try:
-            response = self.dynamodb.get_item(
-                TableName=self.chat_table_name,
+            response = self.chat_sessions_table.get_item(
                 Key={
-                    'pk': {'S': f"USER#{user_id}"},
-                    'sk': {'S': f"SESSION#{session_id}"}
+                    'pk': f"USER#{user_id}",
+                    'sk': f"SESSION#{session_id}"
                 }
             )
             
-            if 'Item' not in response:
-                return None
-                
-            return self._deserialize_chat_session(response['Item'])
+            return response.get('Item')
             
         except ClientError as e:
             logger.error(f"Error getting chat session {session_id}: {e}")
@@ -113,30 +110,28 @@ class ChatRepository:
             Updated chat session dict if successful, None if not found
         """
         try:
-            # Build update expression
+            # Build update expression dynamically
             update_expression = "SET updated_at = :updated_at"
-            expression_values = {':updated_at': {'S': datetime.now(timezone.utc).isoformat()}}
+            expression_values = {':updated_at': datetime.now(timezone.utc).isoformat()}
             
             if 'title' in updates:
                 update_expression += ", title = :title"
-                expression_values[':title'] = {'S': updates['title']}
+                expression_values[':title'] = updates['title']
             
-            response = self.dynamodb.update_item(
-                TableName=self.chat_table_name,
+            response = self.chat_sessions_table.update_item(
                 Key={
-                    'pk': {'S': f"USER#{user_id}"},
-                    'sk': {'S': f"SESSION#{session_id}"}
+                    'pk': f"USER#{user_id}",
+                    'sk': f"SESSION#{session_id}"
                 },
                 UpdateExpression=update_expression,
                 ExpressionAttributeValues=expression_values,
                 ReturnValues='ALL_NEW'
             )
             
-            if 'Attributes' not in response:
-                return None
-                
-            updated_session = self._deserialize_chat_session(response['Attributes'])
-            logger.info(f"Chat session updated successfully: {session_id}")
+            updated_session = response.get('Attributes')
+            if updated_session:
+                logger.info(f"Chat session updated successfully: {session_id}")
+            
             return updated_session
             
         except ClientError as e:
@@ -150,7 +145,7 @@ class ChatRepository:
     
     async def delete_chat_session(self, user_id: int, session_id: str) -> bool:
         """
-        Delete a chat session and all its messages.
+        Delete a chat session.
         
         Args:
             user_id: ID of the user
@@ -160,21 +155,19 @@ class ChatRepository:
             True if deleted successfully, False if not found
         """
         try:
-            
-            response = self.dynamodb.delete_item(
-                TableName=self.chat_table_name,
+            response = self.chat_sessions_table.delete_item(
                 Key={
-                    'pk': {'S': f"USER#{user_id}"},
-                    'sk': {'S': f"SESSION#{session_id}"}
+                    'pk': f"USER#{user_id}",
+                    'sk': f"SESSION#{session_id}"
                 },
                 ReturnValues='ALL_OLD'
             )
             
-            if 'Attributes' not in response:
-                return False
+            deleted = 'Attributes' in response
+            if deleted:
+                logger.info(f"Chat session deleted successfully: {session_id}")
             
-            logger.info(f"Chat session deleted successfully: {session_id}")
-            return True
+            return deleted
             
         except ClientError as e:
             logger.error(f"Error deleting chat session {session_id}: {e}")
@@ -199,22 +192,13 @@ class ChatRepository:
             List of chat session dicts
         """
         try:
-            response = self.dynamodb.query(
-                TableName=self.chat_table_name,
-                KeyConditionExpression='pk = :pk AND begins_with(sk, :sk_prefix)',
-                ExpressionAttributeValues={
-                    ':pk': {'S': f"USER#{user_id}"},
-                    ':sk_prefix': {'S': 'SESSION#'}
-                },
+            response = self.chat_sessions_table.query(
+                KeyConditionExpression=Key('pk').eq(f"USER#{user_id}") & Key('sk').begins_with('SESSION#'),
                 Limit=limit,
                 ScanIndexForward=False  # Most recent first
             )
             
-            sessions = []
-            for item in response.get('Items', []):
-                sessions.append(self._deserialize_chat_session(item))
-            
-            return sessions
+            return response.get('Items', [])
             
         except ClientError as e:
             logger.error(f"Error getting user chat sessions for user {user_id}: {e}")
@@ -239,12 +223,7 @@ class ChatRepository:
         """
         try:
             query_params = {
-                'TableName': self.chat_table_name,
-                'KeyConditionExpression': 'pk = :pk AND begins_with(sk, :sk_prefix)',
-                'ExpressionAttributeValues': {
-                    ':pk': {'S': f"USER#{user_id}"},
-                    ':sk_prefix': {'S': 'SESSION#'}
-                },
+                'KeyConditionExpression': Key('pk').eq(f"USER#{user_id}") & Key('sk').begins_with('SESSION#'),
                 'Limit': limit,
                 'ScanIndexForward': False
             }
@@ -252,13 +231,11 @@ class ChatRepository:
             if last_evaluated_key:
                 query_params['ExclusiveStartKey'] = last_evaluated_key
             
-            response = self.dynamodb.query(**query_params)
+            response = self.chat_sessions_table.query(**query_params)
             
-            sessions = []
-            for item in response.get('Items', []):
-                sessions.append(self._deserialize_chat_session(item))
-            
+            sessions = response.get('Items', [])
             next_key = response.get('LastEvaluatedKey')
+            
             return sessions, next_key
             
         except ClientError as e:
@@ -281,41 +258,46 @@ class ChatRepository:
             List of chat session dicts
         """
         try:
-            response = self.dynamodb.query(
-                TableName=self.chat_table_name,
+            response = self.chat_sessions_table.query(
                 IndexName='GSI1-DataSource-Sessions',
-                KeyConditionExpression='gsi1_pk = :gsi1_pk AND begins_with(gsi1_sk, :gsi1_sk_prefix)',
-                ExpressionAttributeValues={
-                    ':gsi1_pk': {'S': f"DATASOURCE#{data_source_id}"},
-                    ':gsi1_sk_prefix': {'S': 'SESSION#'}
-                },
+                KeyConditionExpression=Key('gsi1_pk').eq(f"DATASOURCE#{data_source_id}") & Key('gsi1_sk').begins_with('SESSION#'),
                 Limit=limit,
                 ScanIndexForward=False  # Most recent first
             )
             
-            sessions = []
-            for item in response.get('Items', []):
-                sessions.append(self._deserialize_chat_session(item))
-            
-            return sessions
+            return response.get('Items', [])
             
         except ClientError as e:
             logger.error(f"Error getting data source sessions for data source {data_source_id}: {e}")
             raise
+
+    async def get_data_source_id_by_session_id(
+        self,
+        session_id: str
+    ) -> Optional[int]: 
+        """
+        Get the data source ID associated with a chat session.
         
-    # ===============================
-    # Helper Methods
-    # ===============================
-    
-    def _deserialize_chat_session(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert DynamoDB item to chat session dict."""
-        return {
-            'session_id': item['session_id']['S'],
-            'user_id': int(item['user_id']['N']),
-            'data_source_id': int(item['data_source_id']['N']),
-            'title': item['title']['S'],
-            'created_at': item['created_at']['S'],
-            'updated_at': item['updated_at']['S']
-        }
-
-
+        Args:
+            session_id: ID of the chat session
+            
+        Returns:
+            Data source ID if found, None otherwise
+        """
+        try:
+            response = self.dynamodb.get_item(
+                TableName=self.chat_table_name,
+                Key={
+                    'sk': {'S': f"SESSION#{session_id}"}
+                },
+                ProjectionExpression='data_source_id'
+            )
+            
+            if 'Item' not in response:
+                return None
+                
+            return int(response['Item']['data_source_id']['N'])
+            
+        except ClientError as e:
+            logger.error(f"Error getting data source ID for session {session_id}: {e}")
+            raise

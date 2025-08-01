@@ -1,8 +1,10 @@
+import asyncio
 from contextlib import asynccontextmanager
+from mangum import Mangum
 from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 from app.config.redis import redis_manager
-from app.config.dynamodb import initialize_database, verify_database
+from app.config.dynamodb import get_dynamodb_connection
 from app.core.exceptions import setup_exception_handling
 from app.core.utils import logger
 from app.routes import auth, user, data_source, chat
@@ -19,35 +21,78 @@ def create_application(lifespan=None):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
-        logger.info("📊 Initializing DynamoDB tables...")
-        db_init_success = initialize_database()
+        logger.info("🔍 Performing DynamoDB health check...")
+        dynamodb = get_dynamodb_connection()
+        if not dynamodb.health_check():
+            logger.error("❌ DynamoDB health check failed")
+            logger.error("💡 Ensure infrastructure is deployed")
+            raise RuntimeError("DynamoDB health check failed")
         
-        if not db_init_success:
-            logger.error("❌ Database initialization failed")
-            raise RuntimeError("Database initialization failed")
+        logger.info("✅ DynamoDB health check passed")
+
+        # Redis connection with timeout
+        logger.info("🔗 Connecting to Redis...")
+        redis_connected = await asyncio.wait_for(
+            redis_manager.connect(max_retries=3), 
+            timeout=30.0
+        )
         
-        # Verify tables are ready
-        logger.info("🔍 Verifying database tables...")
-        db_verify_success = verify_database()
-        
-        if db_verify_success:
-            logger.info("✅ Database setup completed successfully")
+        if not redis_connected:
+            logger.error("❌ Redis connection failed")
+            raise RuntimeError("Redis connection failed and is required")
         else:
-            logger.warning("⚠️ Database verification failed")
+            logger.info("✅ Redis connected successfully")
         
+        # Add any other startup tasks here
+        # startup_tasks.append(initialize_background_tasks())
+        
+        logger.info("🎉 Application startup completed successfully")
+    
+    except asyncio.TimeoutError:
+        logger.error("❌ Startup timed out")
+        raise RuntimeError("Application startup timed out")
+    
     except Exception as e:
         logger.error(f"❌ Startup failed: {e}")
+        # Cleanup any partially initialized resources
+        await cleanup_on_failure()
         raise
 
-    await redis_manager.connect()
-    
-    logger.info("🎉 Application startup completed")
-    
+    # Application is running
     yield
+    
+    # Shutdown phase
+    logger.info("🔄 Starting application shutdown...")
+    
+    try:
+        # Graceful shutdown with timeout
+        shutdown_tasks = [
+            redis_manager.disconnect(timeout=10)
+        ]
+        
+        # Wait for all shutdown tasks with overall timeout
+        await asyncio.wait_for(
+            asyncio.gather(*shutdown_tasks, return_exceptions=True),
+            timeout=15.0
+        )
+        
+        logger.info("✅ Application shutdown completed")
+        
+    except asyncio.TimeoutError:
+        logger.warning("⚠️ Shutdown timed out, some resources may not have closed gracefully")
+    except Exception as e:
+        logger.error(f"❌ Error during shutdown: {e}")
 
-    await redis_manager.disconnect()
+async def cleanup_on_failure():
+    """Cleanup resources when startup fails"""
+    try:
+        if redis_manager.is_connected:
+            await redis_manager.disconnect(timeout=5)
+    except Exception as e:
+        logger.error(f"Error during startup cleanup: {e}")
 
 app = create_application(lifespan=lifespan)
+handler = Mangum(app)
 
 setup_exception_handling(app)
 

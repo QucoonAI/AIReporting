@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 from sqlmodel import select, func, and_, or_
 from datetime import datetime, timezone
 from app.models.data_source import DataSource
@@ -71,7 +71,7 @@ class DataSourceRepository:
                 data_source.data_source_url = update_data.data_source_url
             
             # Update timestamp
-            data_source.data_source_updated_at = datetime.now(timezone.utc)
+            # data_source.data_source_updated_at = datetime.now(timezone.utc)
             
             self.session.add(data_source)
             await self.session.commit()
@@ -361,5 +361,40 @@ class DataSourceRepository:
             
         except Exception as e:
             logger.error(f"Error getting data sources list: {e}")
+            raise
+
+    async def refresh_data_source_schema(self, data_source_id: int, new_schema: Dict[str, Any]) -> DataSource:
+        """
+        Refresh the schema of a data source.
+        
+        Args:
+            data_source_id: ID of the data source to update
+            new_schema: New schema data to save
+            
+        Returns:
+            Updated DataSource object
+            
+        Raises:
+            Exception: If update fails
+        """
+        try:
+            # Get the existing data source
+            data_source = await self.session.get(DataSource, data_source_id)
+            if not data_source:
+                raise ValueError(f"Data source with ID {data_source_id} not found")
+            
+            # Update schema and timestamp
+            data_source.data_source_schema = new_schema
+            data_source.data_source_updated_at = datetime.now(timezone.utc)
+            
+            self.session.add(data_source)
+            await self.session.commit()
+            await self.session.refresh(data_source)
+            
+            return data_source
+            
+        except Exception as e:
+            await self.session.rollback()
+            logger.error(f"Error refreshing schema for data source {data_source_id}: {e}")
             raise
 

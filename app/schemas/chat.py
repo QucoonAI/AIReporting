@@ -115,8 +115,8 @@ class ChatSessionListResponse(BaseModel):
 class ChatMessageResponse(BaseModel):
     """Response schema for chat message"""
     message: str
-    user_message: MessageResponse
     assistant_message: MessageResponse
+    limit_message: Optional[str] = None
 
 
 class EditMessageResponse(BaseModel):

@@ -9,7 +9,10 @@ from app.schemas.data_source import (
     DataSourceDeleteResponse,
     DataSourceResponse,
     DataSourcePaginatedListResponse,
-    PaginationMetadata
+    PaginationMetadata,
+    DataSourceSchemaRefreshResponse,
+    DataSourceSchemaExtractionResponse,
+    DataSourceCreateWithSchemaRequest,
 )
 from app.schemas.enum import DataSourceType
 from app.models.user import User
@@ -20,83 +23,83 @@ from app.core.utils import logger
 router = APIRouter(prefix="/api/v1/data-sources", tags=["Data Sources"])
 
 
-@router.post("/", response_model=DataSourceCreateResponse, status_code=status.HTTP_201_CREATED)
-async def create_data_source(
-    data_source_name: str = Form(...),
-    data_source_type: DataSourceType = Form(...),
-    data_source_url: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
-    service: DataSourceService = Depends(get_data_source_service),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Create a new data source.
+# @router.post("/", response_model=DataSourceCreateResponse, status_code=status.HTTP_201_CREATED,)
+# async def create_data_source(
+#     data_source_name: str = Form(...),
+#     data_source_type: DataSourceType = Form(...),
+#     data_source_url: Optional[str] = Form(None),
+#     file: Optional[UploadFile] = File(None),
+#     service: DataSourceService = Depends(get_data_source_service),
+#     current_user: User = Depends(get_current_user),
+# ):
+#     """
+#     Create a new data source.
     
-    For file-based data sources (CSV, XLSX, PDF), upload the file.
-    For database connections, provide the connection URL.
-    """
-    try:
-        # Validate that either file or URL is provided based on data source type
-        file_based_types = [DataSourceType.CSV, DataSourceType.XLSX, DataSourceType.PDF]
+#     For file-based data sources (CSV, XLSX, PDF), upload the file.
+#     For database connections, provide the connection URL.
+#     """
+#     try:
+#         # Validate that either file or URL is provided based on data source type
+#         file_based_types = [DataSourceType.CSV, DataSourceType.XLSX, DataSourceType.PDF]
         
-        if data_source_type in file_based_types:
-            if not file:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"File is required for {data_source_type.value} data source type"
-                )
-            if data_source_url:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"URL should not be provided for file-based data source type {data_source_type.value}"
-                )
-        else:
-            if not data_source_url:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"URL is required for {data_source_type.value} data source type"
-                )
-            if file:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"File should not be provided for URL-based data source type {data_source_type.value}"
-                )
+#         if data_source_type in file_based_types:
+#             if not file:
+#                 raise HTTPException(
+#                     status_code=status.HTTP_400_BAD_REQUEST,
+#                     detail=f"File is required for {data_source_type.value} data source type"
+#                 )
+#             if data_source_url:
+#                 raise HTTPException(
+#                     status_code=status.HTTP_400_BAD_REQUEST,
+#                     detail=f"URL should not be provided for file-based data source type {data_source_type.value}"
+#                 )
+#         else:
+#             if not data_source_url:
+#                 raise HTTPException(
+#                     status_code=status.HTTP_400_BAD_REQUEST,
+#                     detail=f"URL is required for {data_source_type.value} data source type"
+#                 )
+#             if file:
+#                 raise HTTPException(
+#                     status_code=status.HTTP_400_BAD_REQUEST,
+#                     detail=f"File should not be provided for URL-based data source type {data_source_type.value}"
+#                 )
 
-        # Create request object
-        if data_source_type in file_based_types:
-            # For file-based types, the service will handle S3 upload
-            data_source_data = DataSourceCreateRequest(
-                data_source_name=data_source_name,
-                data_source_type=data_source_type,
-                data_source_url="temp://placeholder"  # Temporary placeholder
-            )
-        else:
-            data_source_data = DataSourceCreateRequest(
-                data_source_name=data_source_name,
-                data_source_type=data_source_type,
-                data_source_url=data_source_url
-            )
+#         # Create request object
+#         if data_source_type in file_based_types:
+#             # For file-based types, the service will handle S3 upload
+#             data_source_data = DataSourceCreateRequest(
+#                 data_source_name=data_source_name,
+#                 data_source_type=data_source_type,
+#                 data_source_url="temp://placeholder"  # Temporary placeholder
+#             )
+#         else:
+#             data_source_data = DataSourceCreateRequest(
+#                 data_source_name=data_source_name,
+#                 data_source_type=data_source_type,
+#                 data_source_url=data_source_url
+#             )
 
-        # Create data source
-        created_data_source = await service.create_data_source(
-            user_id=current_user["user_id"],
-            data_source_data=data_source_data,
-            file=file
-        )
+#         # Create data source
+#         created_data_source = await service.create_data_source(
+#             user_id=current_user["user_id"],
+#             data_source_data=data_source_data,
+#             file=file
+#         )
 
-        return DataSourceCreateResponse(
-            message="Data source created successfully",
-            data_source=DataSourceResponse.model_validate(created_data_source)
-        )
+#         return DataSourceCreateResponse(
+#             message="Data source created successfully",
+#             data_source=DataSourceResponse.model_validate(created_data_source)
+#         )
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error creating data source: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create data source"
-        )
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"Error creating data source: {e}")
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail="Failed to create data source"
+#         )
 
 
 @router.put("/{data_source_id}", response_model=DataSourceUpdateResponse)
@@ -243,6 +246,156 @@ async def delete_data_source(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete data source"
+        )
+
+
+@router.patch("/{data_source_id}/refresh-schema", response_model=DataSourceSchemaRefreshResponse)
+async def refresh_data_source_schema(
+    data_source_id: int,
+    service: DataSourceService = Depends(get_data_source_service),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Refresh the schema of an existing data source.
+    
+    This endpoint re-extracts the schema from the data source (file or database)
+    and updates the stored schema information. Useful when the underlying data
+    structure has changed.
+    """
+    try:
+        # Check if data source belongs to current user
+        existing_data_source = await service.get_data_source_by_id(data_source_id)
+        if existing_data_source.data_source_user_id != current_user["user_id"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to refresh this data source schema"
+            )
+
+        # Refresh the schema
+        updated_data_source = await service.refresh_data_source_schema(data_source_id)
+
+        return DataSourceSchemaRefreshResponse(
+            message="Data source schema refreshed successfully",
+            data_source=DataSourceResponse.model_validate(updated_data_source)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error refreshing schema for data source {data_source_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to refresh data source schema"
+        )
+
+
+@router.post("/upload-extract", response_model=DataSourceSchemaExtractionResponse, status_code=status.HTTP_200_OK)
+async def upload_and_extract_schema(
+    data_source_name: str = Form(...),
+    data_source_type: DataSourceType = Form(...),
+    data_source_url: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    service: DataSourceService = Depends(get_data_source_service),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload file and extract schema without saving to database or S3.
+    File is temporarily stored in Redis for the creation step.
+    
+    For file-based data sources (CSV, XLSX, PDF), upload the file.
+    For database connections, provide the connection URL.
+    
+    Returns the extracted schema for user review and modification.
+    """
+    try:
+        # Validate inputs
+        file_based_types = [DataSourceType.CSV, DataSourceType.XLSX, DataSourceType.PDF]
+        
+        if data_source_type in file_based_types:
+            if not file:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File is required for {data_source_type.value} data source type"
+                )
+            if data_source_url:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"URL should not be provided for file-based data source type {data_source_type.value}"
+                )
+        else:
+            if not data_source_url:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"URL is required for {data_source_type.value} data source type"
+                )
+            if file:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File should not be provided for URL-based data source type {data_source_type.value}"
+                )
+
+        # Extract schema (and store file in Redis if applicable)
+        result = await service.upload_and_extract_schema(
+            user_id=current_user["user_id"],
+            data_source_name=data_source_name,
+            data_source_type=data_source_type.value,
+            data_source_url=data_source_url,
+            file=file
+        )
+
+        return DataSourceSchemaExtractionResponse(
+            message="Schema extracted successfully. Please review and add descriptions before creating the data source.",
+            **result
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error extracting schema: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to extract schema from data source"
+        )
+
+
+@router.post("/create-with-schema", response_model=DataSourceCreateResponse, status_code=status.HTTP_201_CREATED)
+async def create_data_source_with_schema(
+    request: DataSourceCreateWithSchemaRequest,
+    service: DataSourceService = Depends(get_data_source_service),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Create a data source with user-approved schema.
+    
+    For file-based sources, retrieves the temporarily stored file from Redis
+    and uploads it to S3 during creation.
+    
+    This endpoint should be called after /upload-extract with the final
+    schema that includes user-added descriptions and modifications.
+    """
+    try:
+        # Create data source with final schema
+        created_data_source = await service.create_data_source_with_schema(
+            user_id=current_user["user_id"],
+            data_source_name=request.data_source_name,
+            data_source_type=request.data_source_type,
+            data_source_url=request.data_source_url,
+            final_schema=request.final_schema,
+            temp_file_identifier=request.temp_file_identifier
+        )
+
+        return DataSourceCreateResponse(
+            message="Data source created successfully",
+            data_source=DataSourceResponse.model_validate(created_data_source)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating data source with schema: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create data source"
         )
 
 

@@ -19,7 +19,7 @@ from app.repositories.message import MessageRepository
 
 security = HTTPBearer()
 settings = get_settings()
-dynamodb_client = boto3.client('dynamodb', region_name=settings.AWS_REGION)
+dynamodb_client = boto3.client('dynamodb', region_name=settings.REGION)
 
 
 def get_user_repo(db_session: SessionDep = SessionDep) -> UserRepository:  # type: ignore
@@ -58,10 +58,11 @@ def get_user_service(
     )
 
 def get_data_source_service(
-    data_source_repo: DataSourceRepository = Depends(get_data_source_repo)
+    data_source_repo: DataSourceRepository = Depends(get_data_source_repo),
+    redis_factory: RedisServiceFactory = Depends(get_redis_factory_service),
 ) -> DataSourceService:
     """Dependency to get DataSourceService instance"""
-    return DataSourceService(data_source_repo)
+    return DataSourceService(data_source_repo, redis_factory=redis_factory)
 
 def get_llm_service() -> MockLLMService:
     """Dependency to get MockLLMService instance"""

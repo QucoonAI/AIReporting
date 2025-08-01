@@ -1,444 +1,744 @@
 import mysql.connector
-import json
+import urllib.parse
+from typing import Dict, List, Any, Optional, Tuple
+from . import BaseSchemaExtractor, DataSourceSchema, TableSchema, ColumnSchema, DataType
 
 
-def extract_mysql_schema(connection_config: dict, database_name: str) -> str:
-    """
-    Extracts MySQL database schema and returns it as a JSON string.
+class MySQLSchemaExtractor(BaseSchemaExtractor):
+    """MySQL-specific schema extractor using unified architecture"""
     
-    Args:
-        connection_config (dict): MySQL connection configuration
-                                 Example: {
-                                     'host': 'localhost',
-                                     'user': 'username',
-                                     'password': 'password',
-                                     'database': 'database_name',
-                                     'port': 3306
-                                 }
-        database_name (str): Database name to extract schema from
+    def __init__(self, sample_data_limit: int = 100):
+        self.sample_data_limit = sample_data_limit
     
-    Returns:
-        str: JSON string containing the database schema information
-        
-    Raises:
-        mysql.connector.Error: If database connection or query fails
-        json.JSONEncodeError: If JSON serialization fails
-    """
-    
-    schema_info = {
-        "database_name": database_name,
-        "tables": {},
-        "views": {},
-        "functions": {},
-        "procedures": {},
-        "triggers": {},
-        "indexes": {},
-        "constraints": {}
-    }
-    
-    try:
-        # Connect to MySQL
-        conn = mysql.connector.connect(**connection_config)
-        cursor = conn.cursor(dictionary=True)
-        
-        # Extract tables and their columns
-        tables_query = """
-        SELECT 
-            t.TABLE_NAME,
-            c.COLUMN_NAME,
-            c.DATA_TYPE,
-            c.CHARACTER_MAXIMUM_LENGTH,
-            c.NUMERIC_PRECISION,
-            c.NUMERIC_SCALE,
-            c.IS_NULLABLE,
-            c.COLUMN_DEFAULT,
-            c.ORDINAL_POSITION,
-            c.EXTRA,
-            c.COLUMN_TYPE,
-            c.COLUMN_KEY,
-            c.COLUMN_COMMENT
-        FROM INFORMATION_SCHEMA.TABLES t
-        LEFT JOIN INFORMATION_SCHEMA.COLUMNS c 
-            ON t.TABLE_NAME = c.TABLE_NAME 
-            AND t.TABLE_SCHEMA = c.TABLE_SCHEMA
-        WHERE t.TABLE_SCHEMA = %s AND t.TABLE_TYPE = 'BASE TABLE'
-        ORDER BY t.TABLE_NAME, c.ORDINAL_POSITION
+    async def extract_schema(self, connection_string: str, **kwargs) -> DataSourceSchema:
         """
+        Extract unified schema from MySQL database.
         
-        cursor.execute(tables_query, (database_name,))
-        table_results = cursor.fetchall()
-        
-        # Process table results
-        for row in table_results:
-            table_name = row['TABLE_NAME']
-            col_name = row['COLUMN_NAME']
+        Args:
+            connection_string: MySQL connection string or dict
+            **kwargs: Additional options (database_name, include_sample_data, etc.)
             
-            if table_name not in schema_info["tables"]:
-                schema_info["tables"][table_name] = {
-                    "columns": {},
-                    "primary_keys": [],
-                    "foreign_keys": [],
-                    "indexes": [],
-                    "engine": None,
-                    "charset": None,
-                    "collation": None
-                }
-            
-            if col_name:  # Some tables might not have columns in the result
-                schema_info["tables"][table_name]["columns"][col_name] = {
-                    "data_type": row['DATA_TYPE'],
-                    "column_type": row['COLUMN_TYPE'],
-                    "character_maximum_length": row['CHARACTER_MAXIMUM_LENGTH'],
-                    "numeric_precision": row['NUMERIC_PRECISION'],
-                    "numeric_scale": row['NUMERIC_SCALE'],
-                    "is_nullable": row['IS_NULLABLE'] == 'YES',
-                    "column_default": row['COLUMN_DEFAULT'],
-                    "ordinal_position": row['ORDINAL_POSITION'],
-                    "extra": row['EXTRA'],
-                    "column_key": row['COLUMN_KEY'],
-                    "column_comment": row['COLUMN_COMMENT']
-                }
-        
-        # Get table details (engine, charset, collation)
-        table_details_query = """
-        SELECT 
-            TABLE_NAME,
-            ENGINE,
-            TABLE_COLLATION
-        FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_SCHEMA = %s AND TABLE_TYPE = 'BASE TABLE'
+        Returns:
+            DataSourceSchema: Unified schema representation
         """
-        
-        cursor.execute(table_details_query, (database_name,))
-        table_details = cursor.fetchall()
-        
-        for row in table_details:
-            table_name = row['TABLE_NAME']
-            if table_name in schema_info["tables"]:
-                schema_info["tables"][table_name]["engine"] = row['ENGINE']
-                schema_info["tables"][table_name]["collation"] = row['TABLE_COLLATION']
-                # Extract charset from collation (e.g., utf8mb4_unicode_ci -> utf8mb4)
-                if row['TABLE_COLLATION']:
-                    schema_info["tables"][table_name]["charset"] = row['TABLE_COLLATION'].split('_')[0]
-        
-        # Extract primary keys
-        pk_query = """
-        SELECT 
-            tc.TABLE_NAME,
-            kcu.COLUMN_NAME,
-            kcu.ORDINAL_POSITION
-        FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-        JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu 
-            ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-            AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
-            AND tc.TABLE_NAME = kcu.TABLE_NAME
-        WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY' 
-            AND tc.TABLE_SCHEMA = %s
-        ORDER BY tc.TABLE_NAME, kcu.ORDINAL_POSITION
-        """
-        
-        cursor.execute(pk_query, (database_name,))
-        pk_results = cursor.fetchall()
-        
-        for row in pk_results:
-            table_name = row['TABLE_NAME']
-            col_name = row['COLUMN_NAME']
-            if table_name in schema_info["tables"]:
-                schema_info["tables"][table_name]["primary_keys"].append(col_name)
-        
-        # Extract foreign keys
-        fk_query = """
-        SELECT 
-            kcu.TABLE_NAME,
-            kcu.COLUMN_NAME,
-            kcu.CONSTRAINT_NAME,
-            kcu.REFERENCED_TABLE_NAME,
-            kcu.REFERENCED_COLUMN_NAME,
-            rc.UPDATE_RULE,
-            rc.DELETE_RULE
-        FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-        JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc 
-            ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
-            AND kcu.TABLE_SCHEMA = rc.CONSTRAINT_SCHEMA
-        WHERE kcu.TABLE_SCHEMA = %s 
-            AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
-        """
-        
-        cursor.execute(fk_query, (database_name,))
-        fk_results = cursor.fetchall()
-        
-        for row in fk_results:
-            table_name = row['TABLE_NAME']
-            if table_name in schema_info["tables"]:
-                schema_info["tables"][table_name]["foreign_keys"].append({
-                    "column": row['COLUMN_NAME'],
-                    "references_table": row['REFERENCED_TABLE_NAME'],
-                    "references_column": row['REFERENCED_COLUMN_NAME'],
-                    "constraint_name": row['CONSTRAINT_NAME'],
-                    "update_rule": row['UPDATE_RULE'],
-                    "delete_rule": row['DELETE_RULE']
-                })
-        
-        # Extract views
-        views_query = """
-        SELECT 
-            TABLE_NAME,
-            VIEW_DEFINITION,
-            CHECK_OPTION,
-            IS_UPDATABLE,
-            SECURITY_TYPE
-        FROM INFORMATION_SCHEMA.VIEWS
-        WHERE TABLE_SCHEMA = %s
-        """
-        
-        cursor.execute(views_query, (database_name,))
-        view_results = cursor.fetchall()
-        
-        for row in view_results:
-            view_name = row['TABLE_NAME']
-            schema_info["views"][view_name] = {
-                "definition": row['VIEW_DEFINITION'],
-                "check_option": row['CHECK_OPTION'],
-                "is_updatable": row['IS_UPDATABLE'] == 'YES',
-                "security_type": row['SECURITY_TYPE']
-            }
-        
-        # Extract stored procedures
-        procedures_query = """
-        SELECT 
-            ROUTINE_NAME,
-            ROUTINE_TYPE,
-            ROUTINE_DEFINITION,
-            SECURITY_TYPE,
-            SQL_DATA_ACCESS,
-            ROUTINE_COMMENT
-        FROM INFORMATION_SCHEMA.ROUTINES
-        WHERE ROUTINE_SCHEMA = %s AND ROUTINE_TYPE = 'PROCEDURE'
-        """
-        
-        cursor.execute(procedures_query, (database_name,))
-        procedure_results = cursor.fetchall()
-        
-        for row in procedure_results:
-            procedure_name = row['ROUTINE_NAME']
-            schema_info["procedures"][procedure_name] = {
-                "type": row['ROUTINE_TYPE'],
-                "definition": row['ROUTINE_DEFINITION'],
-                "security_type": row['SECURITY_TYPE'],
-                "sql_data_access": row['SQL_DATA_ACCESS'],
-                "comment": row['ROUTINE_COMMENT']
-            }
-        
-        # Extract functions
-        functions_query = """
-        SELECT 
-            ROUTINE_NAME,
-            ROUTINE_TYPE,
-            ROUTINE_DEFINITION,
-            SECURITY_TYPE,
-            SQL_DATA_ACCESS,
-            ROUTINE_COMMENT,
-            DTD_IDENTIFIER as RETURN_TYPE
-        FROM INFORMATION_SCHEMA.ROUTINES
-        WHERE ROUTINE_SCHEMA = %s AND ROUTINE_TYPE = 'FUNCTION'
-        """
-        
-        cursor.execute(functions_query, (database_name,))
-        function_results = cursor.fetchall()
-        
-        for row in function_results:
-            function_name = row['ROUTINE_NAME']
-            schema_info["functions"][function_name] = {
-                "type": row['ROUTINE_TYPE'],
-                "definition": row['ROUTINE_DEFINITION'],
-                "return_type": row['RETURN_TYPE'],
-                "security_type": row['SECURITY_TYPE'],
-                "sql_data_access": row['SQL_DATA_ACCESS'],
-                "comment": row['ROUTINE_COMMENT']
-            }
-        
-        # Extract triggers
-        triggers_query = """
-        SELECT 
-            TRIGGER_NAME,
-            EVENT_MANIPULATION,
-            EVENT_OBJECT_TABLE,
-            ACTION_STATEMENT,
-            ACTION_TIMING,
-            ACTION_ORIENTATION
-        FROM INFORMATION_SCHEMA.TRIGGERS
-        WHERE TRIGGER_SCHEMA = %s
-        """
-        
-        cursor.execute(triggers_query, (database_name,))
-        trigger_results = cursor.fetchall()
-        
-        for row in trigger_results:
-            trigger_name = row['TRIGGER_NAME']
-            schema_info["triggers"][trigger_name] = {
-                "event": row['EVENT_MANIPULATION'],
-                "table": row['EVENT_OBJECT_TABLE'],
-                "timing": row['ACTION_TIMING'],
-                "orientation": row['ACTION_ORIENTATION'],
-                "statement": row['ACTION_STATEMENT']
-            }
-        
-        # Extract indexes (using SHOW INDEX for more detailed info)
-        cursor_raw = conn.cursor()
-        
-        for table_name in schema_info["tables"].keys():
-            cursor_raw.execute(f"SHOW INDEX FROM `{table_name}` FROM `{database_name}`")
-            index_results = cursor_raw.fetchall()
-            
-            index_info = {}
-            for row in index_results:
-                index_name = row[2]  # Key_name
-                if index_name not in index_info:
-                    index_info[index_name] = {
-                        "table": table_name,
-                        "columns": [],
-                        "is_unique": row[1] == 0,  # Non_unique (0 = unique, 1 = non-unique)
-                        "type": row[10] if len(row) > 10 else None,  # Index_type
-                        "comment": row[11] if len(row) > 11 else None  # Index_comment
-                    }
-                
-                index_info[index_name]["columns"].append({
-                    "column_name": row[4],  # Column_name
-                    "sequence": row[3],     # Seq_in_index
-                    "collation": row[7],    # Collation
-                    "cardinality": row[6],  # Cardinality
-                    "sub_part": row[8]      # Sub_part
-                })
-            
-            # Sort columns by sequence
-            for idx_name, idx_data in index_info.items():
-                idx_data["columns"].sort(key=lambda x: x["sequence"])
-                schema_info["indexes"][f"{table_name}.{idx_name}"] = idx_data
-        
-        # Extract check constraints (MySQL 8.0+)
         try:
-            check_constraints_query = """
+            # Parse connection parameters
+            if isinstance(connection_string, str):
+                connection_config, database_name = self._parse_connection_string(connection_string)
+            else:
+                connection_config = connection_string
+                database_name = kwargs.get('database_name') or connection_config.get('database')
+            
+            if not database_name:
+                raise ValueError("Database name must be specified")
+            
+            # Extract schema
+            tables = await self._extract_tables_schema(connection_config, database_name, **kwargs)
+            
+            if not tables:
+                raise ValueError(f"No tables found in database '{database_name}'")
+            
+            # Calculate metadata
+            total_rows = sum(table.row_count or 0 for table in tables)
+            business_context = self._infer_business_context(tables)
+            
+            return DataSourceSchema(
+                source_name=f"mysql_{database_name}",
+                source_type="mysql",
+                tables=tables,
+                metadata={
+                    "database_name": database_name,
+                    "total_tables": len(tables),
+                    "business_context": business_context,
+                    "database_engine": "MySQL",
+                    "supports_transactions": True,
+                    "supports_foreign_keys": True
+                }
+            )
+            
+        except Exception as e:
+            raise Exception(f"Error extracting MySQL schema: {e}")
+    
+    def _parse_connection_string(self, connection_string: str) -> Tuple[Dict[str, Any], str]:
+        """Parse MySQL connection string"""
+        try:
+            parsed = urllib.parse.urlparse(connection_string)
+            
+            connection_config = {
+                'host': parsed.hostname or 'localhost',
+                'port': parsed.port or 3306,
+                'user': parsed.username,
+                'password': parsed.password,
+            }
+            
+            # Extract database name from path
+            database_name = parsed.path.lstrip('/') if parsed.path else None
+            
+            # Add database to config if present
+            if database_name:
+                connection_config['database'] = database_name
+            
+            return connection_config, database_name
+            
+        except Exception as e:
+            raise ValueError(f"Invalid MySQL connection string: {e}")
+    
+    async def _extract_tables_schema(self, connection_config: Dict[str, Any], database_name: str, **kwargs) -> List[TableSchema]:
+        """Extract schema for all tables in the database"""
+        tables = []
+        
+        try:
+            # Connect to MySQL
+            conn = mysql.connector.connect(**connection_config)
+            cursor = conn.cursor(dictionary=True)
+            
+            # Get list of tables
+            table_names = self._get_table_names(cursor, database_name)
+            
+            for table_name in table_names:
+                table_schema = self._analyze_table(cursor, database_name, table_name, **kwargs)
+                if table_schema:
+                    tables.append(table_schema)
+            
+            cursor.close()
+            conn.close()
+            
+            return tables
+            
+        except mysql.connector.Error as e:
+            raise Exception(f"MySQL database error: {e}")
+    
+    def _get_table_names(self, cursor, database_name: str) -> List[str]:
+        """Get list of all tables in the database"""
+        query = """
+        SELECT TABLE_NAME 
+        FROM INFORMATION_SCHEMA.TABLES 
+        WHERE TABLE_SCHEMA = %s AND TABLE_TYPE = 'BASE TABLE'
+        ORDER BY TABLE_NAME
+        """
+        cursor.execute(query, (database_name,))
+        return [row['TABLE_NAME'] for row in cursor.fetchall()]
+    
+    def _analyze_table(self, cursor, database_name: str, table_name: str, **kwargs) -> Optional[TableSchema]:
+        """Analyze individual MySQL table"""
+        try:
+            # Get table columns
+            columns = self._get_table_columns(cursor, database_name, table_name, **kwargs)
+            
+            if not columns:
+                return None
+            
+            # Get table row count
+            row_count = self._get_table_row_count(cursor, database_name, table_name)
+            
+            # Get table metadata
+            table_info = self._get_table_info(cursor, database_name, table_name)
+            
+            # Determine table type and relationships
+            table_type = self._determine_table_type(table_name, columns)
+            
+            return TableSchema(
+                name=table_name,
+                columns=columns,
+                row_count=row_count,
+                table_type=table_type,
+                primary_keys=self._extract_primary_keys(columns),
+                foreign_keys=self._get_foreign_keys(cursor, database_name, table_name),
+                indexes=self._get_table_indexes(cursor, database_name, table_name),
+                description=self._generate_table_description(table_name, columns, row_count, table_info)
+            )
+            
+        except Exception as e:
+            print(f"Warning: Failed to analyze table '{table_name}': {e}")
+            return None
+    
+    def _get_table_columns(self, cursor, database_name: str, table_name: str, **kwargs) -> List[ColumnSchema]:
+        """Get detailed column information for a table"""
+        query = """
+        SELECT 
+            COLUMN_NAME,
+            DATA_TYPE,
+            COLUMN_TYPE,
+            IS_NULLABLE,
+            COLUMN_DEFAULT,
+            CHARACTER_MAXIMUM_LENGTH,
+            NUMERIC_PRECISION,
+            NUMERIC_SCALE,
+            ORDINAL_POSITION,
+            COLUMN_KEY,
+            EXTRA,
+            COLUMN_COMMENT
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+        ORDER BY ORDINAL_POSITION
+        """
+        
+        cursor.execute(query, (database_name, table_name))
+        column_rows = cursor.fetchall()
+        
+        columns = []
+        include_sample_data = kwargs.get('include_sample_data', True)
+        
+        for row in column_rows:
+            column = self._create_column_schema(cursor, database_name, table_name, row, include_sample_data)
+            columns.append(column)
+        
+        return columns
+    
+    def _create_column_schema(self, cursor, database_name: str, table_name: str, column_info: Dict, include_sample_data: bool) -> ColumnSchema:
+        """Create ColumnSchema from MySQL column information"""
+        col_name = column_info['COLUMN_NAME']
+        mysql_type = column_info['DATA_TYPE']
+        column_type = column_info['COLUMN_TYPE']
+        
+        # Map MySQL type to unified type
+        data_type = self._map_mysql_type_to_unified(mysql_type, column_type)
+        
+        # Get sample data if requested
+        sample_values = []
+        value_stats = {}
+        
+        if include_sample_data:
+            sample_values, value_stats = self._get_column_sample_data(
+                cursor, database_name, table_name, col_name, data_type
+            )
+        
+        # Infer semantic type
+        semantic_type = self._infer_semantic_type(col_name, data_type, sample_values)
+        
+        # Create column schema
+        column = ColumnSchema(
+            name=col_name,
+            data_type=semantic_type,
+            original_type=f"{mysql_type}({column_type})",
+            is_nullable=column_info['IS_NULLABLE'] == 'YES',
+            is_primary_key=column_info['COLUMN_KEY'] == 'PRI',
+            is_unique=column_info['COLUMN_KEY'] in ('PRI', 'UNI'),
+            sample_values=sample_values[:3],  # Limit to 3 samples
+            description=self._generate_column_description(col_name, semantic_type, column_info),
+            constraints=self._extract_column_constraints(column_info)
+        )
+
+        column.is_foreign_key = self._detect_foreign_key_status(cursor, database_name, table_name, col_name)
+        
+        # Add statistics from sample data
+        if value_stats:
+            column.value_count = value_stats.get('total_count', 0)
+            column.null_count = value_stats.get('null_count', 0)
+            column.unique_count = value_stats.get('unique_count', 0)
+            column.min_value = value_stats.get('min_value')
+            column.max_value = value_stats.get('max_value')
+            column.avg_value = value_stats.get('avg_value')
+            column.min_length = value_stats.get('min_length')
+            column.max_length = value_stats.get('max_length')
+            column.avg_length = value_stats.get('avg_length')
+        
+        return column
+    
+    def _map_mysql_type_to_unified(self, mysql_type: str, column_type: str) -> DataType:
+        """Map MySQL data types to unified DataType enum"""
+        mysql_type_lower = mysql_type.lower()
+        
+        # Integer types
+        if mysql_type_lower in ('tinyint', 'smallint', 'mediumint', 'int', 'integer', 'bigint'):
+            # Check for boolean (tinyint(1))
+            if mysql_type_lower == 'tinyint' and '(1)' in column_type:
+                return DataType.BOOLEAN
+            return DataType.INTEGER
+        
+        # Decimal types
+        elif mysql_type_lower in ('decimal', 'numeric', 'float', 'double', 'real'):
+            return DataType.DECIMAL
+        
+        # String types
+        elif mysql_type_lower in ('char', 'varchar', 'text', 'tinytext', 'mediumtext', 'longtext'):
+            return DataType.TEXT
+        
+        # Date/Time types
+        elif mysql_type_lower == 'date':
+            return DataType.DATE
+        elif mysql_type_lower in ('datetime', 'timestamp'):
+            return DataType.DATETIME
+        elif mysql_type_lower == 'time':
+            return DataType.TIME
+        
+        # JSON type (MySQL 5.7+)
+        elif mysql_type_lower == 'json':
+            return DataType.JSON
+        
+        # Binary types
+        elif mysql_type_lower in ('binary', 'varbinary', 'blob', 'tinyblob', 'mediumblob', 'longblob'):
+            return DataType.BINARY
+        
+        # Enum/Set as categorical
+        elif mysql_type_lower in ('enum', 'set'):
+            return DataType.CATEGORICAL
+        
+        else:
+            return DataType.UNKNOWN
+    
+    def _get_column_sample_data(self, cursor, database_name: str, table_name: str, column_name: str, data_type: DataType) -> Tuple[List[str], Dict[str, Any]]:
+        """Get sample data and statistics for a column"""
+        try:
+            # Get sample data
+            sample_query = f"""
+            SELECT `{column_name}` 
+            FROM `{database_name}`.`{table_name}` 
+            WHERE `{column_name}` IS NOT NULL 
+            LIMIT {self.sample_data_limit}
+            """
+            cursor.execute(sample_query)
+            sample_results = cursor.fetchall()
+            sample_values = [str(row[column_name]) for row in sample_results if row[column_name] is not None]
+            
+            # Get basic statistics
+            stats_query = f"""
             SELECT 
-                CONSTRAINT_NAME,
-                TABLE_NAME,
-                CHECK_CLAUSE
-            FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = %s
+                COUNT(*) as total_count,
+                COUNT(`{column_name}`) as non_null_count,
+                COUNT(DISTINCT `{column_name}`) as unique_count
+            FROM `{database_name}`.`{table_name}`
+            """
+            cursor.execute(stats_query)
+            stats_result = cursor.fetchone()
+            
+            value_stats = {
+                'total_count': stats_result['total_count'],
+                'null_count': stats_result['total_count'] - stats_result['non_null_count'],
+                'unique_count': stats_result['unique_count']
+            }
+            
+            # Add type-specific statistics
+            if data_type in [DataType.INTEGER, DataType.DECIMAL, DataType.CURRENCY] and sample_values:
+                try:
+                    numeric_stats_query = f"""
+                    SELECT 
+                        MIN(`{column_name}`) as min_val,
+                        MAX(`{column_name}`) as max_val,
+                        AVG(`{column_name}`) as avg_val
+                    FROM `{database_name}`.`{table_name}`
+                    WHERE `{column_name}` IS NOT NULL
+                    """
+                    cursor.execute(numeric_stats_query)
+                    numeric_result = cursor.fetchone()
+                    if numeric_result:
+                        value_stats.update({
+                            'min_value': float(numeric_result['min_val']) if numeric_result['min_val'] is not None else None,
+                            'max_value': float(numeric_result['max_val']) if numeric_result['max_val'] is not None else None,
+                            'avg_value': float(numeric_result['avg_val']) if numeric_result['avg_val'] is not None else None
+                        })
+                except Exception:
+                    pass  # Skip numeric stats if query fails
+            
+            elif data_type == DataType.TEXT and sample_values:
+                try:
+                    text_stats_query = f"""
+                    SELECT 
+                        MIN(LENGTH(`{column_name}`)) as min_len,
+                        MAX(LENGTH(`{column_name}`)) as max_len,
+                        AVG(LENGTH(`{column_name}`)) as avg_len
+                    FROM `{database_name}`.`{table_name}`
+                    WHERE `{column_name}` IS NOT NULL
+                    """
+                    cursor.execute(text_stats_query)
+                    text_result = cursor.fetchone()
+                    if text_result:
+                        value_stats.update({
+                            'min_length': int(text_result['min_len']) if text_result['min_len'] is not None else None,
+                            'max_length': int(text_result['max_len']) if text_result['max_len'] is not None else None,
+                            'avg_length': float(text_result['avg_len']) if text_result['avg_len'] is not None else None
+                        })
+                except Exception:
+                    pass  # Skip text stats if query fails
+            
+            return sample_values, value_stats
+            
+        except Exception as e:
+            print(f"Warning: Could not get sample data for {table_name}.{column_name}: {e}")
+            return [], {}
+    
+    def _get_table_row_count(self, cursor, database_name: str, table_name: str) -> Optional[int]:
+        """Get approximate row count for table"""
+        try:
+            # Try to get from information_schema first (faster but approximate)
+            query = """
+            SELECT TABLE_ROWS 
+            FROM INFORMATION_SCHEMA.TABLES 
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+            """
+            cursor.execute(query, (database_name, table_name))
+            result = cursor.fetchone()
+            
+            if result and result['TABLE_ROWS']:
+                return int(result['TABLE_ROWS'])
+            
+            # Fallback to actual count (slower but accurate)
+            count_query = f"SELECT COUNT(*) as row_count FROM `{database_name}`.`{table_name}`"
+            cursor.execute(count_query)
+            count_result = cursor.fetchone()
+            return int(count_result['row_count']) if count_result else 0
+            
+        except Exception as e:
+            print(f"Warning: Could not get row count for {table_name}: {e}")
+            return None
+    
+    def _get_table_info(self, cursor, database_name: str, table_name: str) -> Dict[str, Any]:
+        """Get additional table information"""
+        try:
+            query = """
+            SELECT 
+                ENGINE,
+                TABLE_COLLATION,
+                TABLE_COMMENT,
+                CREATE_TIME,
+                UPDATE_TIME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+            """
+            cursor.execute(query, (database_name, table_name))
+            result = cursor.fetchone()
+            
+            if result:
+                return {
+                    'engine': result.get('ENGINE'),
+                    'collation': result.get('TABLE_COLLATION'),
+                    'comment': result.get('TABLE_COMMENT'),
+                    'created': result.get('CREATE_TIME'),
+                    'updated': result.get('UPDATE_TIME')
+                }
+            
+            return {}
+            
+        except Exception:
+            return {}
+    
+    def _get_foreign_keys(self, cursor, database_name: str, table_name: str) -> List[Dict[str, str]]:
+        """Get foreign key relationships for the table"""
+        try:
+            query = """
+            SELECT 
+                kcu.COLUMN_NAME,
+                kcu.REFERENCED_TABLE_NAME,
+                kcu.REFERENCED_COLUMN_NAME,
+                kcu.CONSTRAINT_NAME,
+                rc.UPDATE_RULE,
+                rc.DELETE_RULE
+            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+            JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc 
+                ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
+                AND kcu.TABLE_SCHEMA = rc.CONSTRAINT_SCHEMA
+            WHERE kcu.TABLE_SCHEMA = %s 
+                AND kcu.TABLE_NAME = %s 
+                AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
             """
             
-            cursor.execute(check_constraints_query, (database_name,))
-            constraint_results = cursor.fetchall()
+            cursor.execute(query, (database_name, table_name))
+            results = cursor.fetchall()
             
-            for row in constraint_results:
-                constraint_name = row['CONSTRAINT_NAME']
-                schema_info["constraints"][constraint_name] = {
-                    "table": row['TABLE_NAME'],
-                    "type": "CHECK",
-                    "definition": row['CHECK_CLAUSE']
-                }
-        except mysql.connector.ProgrammingError:
-            # CHECK_CONSTRAINTS table doesn't exist in older MySQL versions
-            pass
+            foreign_keys = []
+            for row in results:
+                foreign_keys.append({
+                    'column': row['COLUMN_NAME'],
+                    'references_table': row['REFERENCED_TABLE_NAME'],
+                    'references_column': row['REFERENCED_COLUMN_NAME'],
+                    'constraint_name': row['CONSTRAINT_NAME'],
+                    'update_rule': row['UPDATE_RULE'],
+                    'delete_rule': row['DELETE_RULE']
+                })
+            
+            return foreign_keys
+            
+        except Exception as e:
+            print(f"Warning: Could not get foreign keys for {table_name}: {e}")
+            return []
+    
+    def _get_table_indexes(self, cursor, database_name: str, table_name: str) -> List[Dict[str, Any]]:
+        """Get indexes for the table"""
+        try:
+            query = f"SHOW INDEX FROM `{database_name}`.`{table_name}`"
+            cursor.execute(query)
+            results = cursor.fetchall()
+            
+            # Group indexes by name
+            indexes_dict = {}
+            for row in results:
+                index_name = row['Key_name']
+                if index_name not in indexes_dict:
+                    indexes_dict[index_name] = {
+                        'name': index_name,
+                        'is_unique': row['Non_unique'] == 0,
+                        'columns': [],
+                        'type': row.get('Index_type', 'BTREE')
+                    }
+                
+                indexes_dict[index_name]['columns'].append({
+                    'column_name': row['Column_name'],
+                    'sequence': row['Seq_in_index'],
+                    'collation': row.get('Collation'),
+                    'cardinality': row.get('Cardinality')
+                })
+            
+            # Sort columns by sequence and convert to list
+            indexes = []
+            for index_info in indexes_dict.values():
+                index_info['columns'].sort(key=lambda x: x['sequence'])
+                indexes.append(index_info)
+            
+            return indexes
+            
+        except Exception as e:
+            print(f"Warning: Could not get indexes for {table_name}: {e}")
+            return []
+    
+    def _extract_primary_keys(self, columns: List[ColumnSchema]) -> List[str]:
+        """Extract primary key column names"""
+        return [col.name for col in columns if col.is_primary_key]
+    
+    def _extract_column_constraints(self, column_info: Dict) -> List[str]:
+        """Extract column constraints"""
+        constraints = []
         
-        # Extract unique constraints
-        unique_constraints_query = """
-        SELECT 
-            tc.CONSTRAINT_NAME,
-            tc.TABLE_NAME,
-            GROUP_CONCAT(kcu.COLUMN_NAME ORDER BY kcu.ORDINAL_POSITION) as COLUMNS
-        FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-        JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu 
-            ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-            AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
-            AND tc.TABLE_NAME = kcu.TABLE_NAME
-        WHERE tc.CONSTRAINT_TYPE = 'UNIQUE' 
-            AND tc.TABLE_SCHEMA = %s
-        GROUP BY tc.CONSTRAINT_NAME, tc.TABLE_NAME
-        """
+        if column_info['COLUMN_KEY'] == 'PRI':
+            constraints.append('PRIMARY_KEY')
+        elif column_info['COLUMN_KEY'] == 'UNI':
+            constraints.append('UNIQUE')
+        elif column_info['COLUMN_KEY'] == 'MUL':
+            constraints.append('INDEX')
         
-        cursor.execute(unique_constraints_query, (database_name,))
-        unique_results = cursor.fetchall()
+        if column_info['IS_NULLABLE'] == 'NO':
+            constraints.append('NOT_NULL')
         
-        for row in unique_results:
-            constraint_name = row['CONSTRAINT_NAME']
-            schema_info["constraints"][constraint_name] = {
-                "table": row['TABLE_NAME'],
-                "type": "UNIQUE",
-                "columns": row['COLUMNS']
-            }
+        if 'auto_increment' in (column_info.get('EXTRA', '') or '').lower():
+            constraints.append('AUTO_INCREMENT')
         
-        cursor.close()
-        cursor_raw.close()
-        conn.close()
+        return constraints if constraints else None
+    
+    def _determine_table_type(self, table_name: str, columns: List[ColumnSchema]) -> str:
+        """Determine the business type of the table"""
+        name_lower = table_name.lower()
         
-        return json.dumps(schema_info, indent=2, default=str)
+        # Common business table patterns
+        if any(pattern in name_lower for pattern in ['user', 'customer', 'client']):
+            return 'customer_table'
+        elif any(pattern in name_lower for pattern in ['order', 'transaction', 'purchase', 'sale']):
+            return 'transaction_table'
+        elif any(pattern in name_lower for pattern in ['product', 'item', 'inventory']):
+            return 'product_table'
+        elif any(pattern in name_lower for pattern in ['employee', 'staff']):
+            return 'employee_table'
+        elif any(pattern in name_lower for pattern in ['log', 'audit', 'history']):
+            return 'audit_table'
+        elif any(pattern in name_lower for pattern in ['config', 'setting', 'parameter']):
+            return 'configuration_table'
+        elif any(pattern in name_lower for pattern in ['lookup', 'reference', 'master']):
+            return 'reference_table'
+        elif len(columns) > 20:
+            return 'complex_data_table'
+        else:
+            return 'business_table'
+    
+    def _generate_table_description(self, table_name: str, columns: List[ColumnSchema], row_count: Optional[int], table_info: Dict) -> str:
+        """Generate comprehensive table description"""
+        desc_parts = [f"MySQL table '{table_name}' with {len(columns)} columns"]
         
-    except mysql.connector.Error as e:
-        raise mysql.connector.Error(f"Database error: {e}")
-    except json.JSONEncodeError as e:
-        raise json.JSONEncodeError(f"JSON serialization error: {e}")
+        if row_count:
+            desc_parts.append(f"and {row_count:,} rows")
+        
+        # Add business context
+        pk_cols = [col for col in columns if col.is_primary_key]
+        if pk_cols:
+            desc_parts.append(f"Primary key: {', '.join(col.name for col in pk_cols)}")
+        
+        fk_cols = [col for col in columns if col.is_foreign_key]
+        if fk_cols:
+            desc_parts.append(f"Has {len(fk_cols)} foreign key relationship(s)")
+        
+        # Add technical details
+        if table_info.get('engine'):
+            desc_parts.append(f"Engine: {table_info['engine']}")
+        
+        if table_info.get('comment'):
+            desc_parts.append(f"Comment: {table_info['comment']}")
+        
+        return " | ".join(desc_parts)
+    
+    def _generate_column_description(self, col_name: str, data_type: DataType, column_info: Dict) -> str:
+        """Generate business-focused column description"""
+        name_lower = col_name.lower()
+        
+        # Business context based on column name and type
+        if data_type == DataType.IDENTIFIER:
+            if 'customer' in name_lower:
+                return f"Customer identifier - {column_info.get('COLUMN_COMMENT', 'references customer entity')}"
+            elif 'order' in name_lower:
+                return f"Order identifier - {column_info.get('COLUMN_COMMENT', 'tracks order transactions')}"
+            elif 'product' in name_lower:
+                return f"Product identifier - {column_info.get('COLUMN_COMMENT', 'references product catalog')}"
+            else:
+                return f"Unique identifier - {column_info.get('COLUMN_COMMENT', 'primary business key')}"
+        
+        elif data_type == DataType.EMAIL:
+            return f"Email address field - {column_info.get('COLUMN_COMMENT', 'for communication')}"
+        
+        elif data_type == DataType.CURRENCY:
+            if 'price' in name_lower:
+                return f"Price information - {column_info.get('COLUMN_COMMENT', 'monetary pricing data')}"
+            elif 'total' in name_lower or 'amount' in name_lower:
+                return f"Total amount - {column_info.get('COLUMN_COMMENT', 'calculated monetary value')}"
+            else:
+                return f"Financial data - {column_info.get('COLUMN_COMMENT', 'monetary values')}"
+        
+        elif data_type == DataType.CATEGORICAL:
+            return f"Categorical field - {column_info.get('COLUMN_COMMENT', 'classification/status data')}"
+        
+        elif data_type in [DataType.DATE, DataType.DATETIME]:
+            if 'created' in name_lower:
+                return f"Creation timestamp - {column_info.get('COLUMN_COMMENT', 'record creation time')}"
+            elif 'updated' in name_lower or 'modified' in name_lower:
+                return f"Update timestamp - {column_info.get('COLUMN_COMMENT', 'last modification time')}"
+            else:
+                return f"Temporal data - {column_info.get('COLUMN_COMMENT', 'date/time information')}"
+        
+        else:
+            comment = column_info.get('COLUMN_COMMENT', f"{data_type.value} data field")
+            return f"{data_type.value.title()} field - {comment}"
+    
+    def _infer_business_context(self, tables: List[TableSchema]) -> str:
+        """Infer overall business context of the database"""
+        table_names = [table.name.lower() for table in tables]
+        
+        # E-commerce patterns
+        if any('order' in name for name in table_names) and any('customer' in name for name in table_names):
+            return "ecommerce_database"
+        
+        # CRM patterns
+        elif any('customer' in name or 'contact' in name for name in table_names):
+            return "crm_database"
+        
+        # HR patterns
+        elif any('employee' in name or 'staff' in name for name in table_names):
+            return "hr_database"
+        
+        # Financial patterns
+        elif any('account' in name or 'transaction' in name for name in table_names):
+            return "financial_database"
+        
+        # Inventory patterns
+        elif any('product' in name or 'inventory' in name for name in table_names):
+            return "inventory_database"
+        
+        # Content management
+        elif any('post' in name or 'article' in name or 'content' in name for name in table_names):
+            return "cms_database"
+        
+        else:
+            return "business_database"
+    
+    def _detect_foreign_key_status(self, cursor, database_name: str, table_name: str, column_name: str) -> bool:
+        """Check if column is a foreign key"""
+        try:
+            query = """
+            SELECT COUNT(*)
+            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+            WHERE kcu.TABLE_SCHEMA = %s 
+                AND kcu.TABLE_NAME = %s 
+                AND kcu.COLUMN_NAME = %s
+                AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+            """
+            cursor.execute(query, (database_name, table_name, column_name))
+            result = cursor.fetchone()
+            return result['COUNT(*)'] > 0 if result else False
+        except Exception:
+            return False
 
-# Alternative function using connection string
-def extract_mysql_schema_from_string(connection_string: str, database_name: str) -> str:
-    """
-    Alternative function that accepts a MySQL connection string.
+    def get_source_type(self) -> str:
+        return "mysql"
+
+
+# Helper function for connection string extraction
+def extract_mysql_schema_from_string(connection_string: str, database_name: str = None) -> DataSourceSchema:
+    """Extract schema from MySQL using connection string"""
+    import asyncio
     
-    Args:
-        connection_string (str): MySQL connection string in format:
-                                "mysql://user:password@host:port/database"
-                                or "mysql+pymysql://user:password@host:port/database"
-        database_name (str): Database name to extract schema from
+    async def _extract():
+        extractor = MySQLSchemaExtractor()
+        return await extractor.extract_schema(connection_string, database_name=database_name)
     
-    Returns:
-        str: JSON string containing the database schema information
-    """
-    import urllib.parse
-    
-    # Parse connection string
-    parsed = urllib.parse.urlparse(connection_string)
-    
-    connection_config = {
-        'host': parsed.hostname or 'localhost',
-        'port': parsed.port or 3306,
-        'user': parsed.username,
-        'password': parsed.password,
-        'database': database_name
-    }
-    
-    return extract_mysql_schema(connection_config, database_name)
+    return asyncio.run(_extract())
+
 
 # Example usage
 if __name__ == "__main__":
-    # Example connection configuration
-    config = {
-        'host': 'localhost',
-        'user': 'username',
-        'password': 'password',
-        'database': 'mydb',
-        'port': 3306
-    }
+    import asyncio
+    import json
     
-    # Alternative connection strings
-    connection_string_examples = [
-        "mysql://user:password@localhost:3306/mydb",
-        "mysql://user:password@localhost/mydb",  # Default port
-        "mysql://user@localhost/mydb",           # No password
-    ]
-    
-    try:
-        # Method 1: Using connection config dict
-        schema_json = extract_mysql_schema(config, 'mydb')
-        print(schema_json)
+    async def test_mysql_extractor():
+        """Test the MySQL extractor"""
+        print("MySQL Schema Extractor Test")
+        print("=" * 50)
         
-        # Method 2: Using connection string
-        # schema_json = extract_mysql_schema_from_string(
-        #     "mysql://user:password@localhost:3306/mydb", 
-        #     'mydb'
-        # )
+        # Example connection string
+        connection_string = "mysql://user:password@localhost:3306/ecommerce_db"
         
-        # Optionally save to file
-        with open('mysql_database_schema.json', 'w') as f:
-            f.write(schema_json)
+        try:
+            extractor = MySQLSchemaExtractor()
+            # schema = await extractor.extract_schema(connection_string)
             
-    except Exception as e:
-        print(f"Error extracting schema: {e}")
+            # Mock example output
+            example_output = {
+                "source_name": "mysql_ecommerce_db",
+                "source_type": "mysql",
+                "total_tables": 5,
+                "total_columns": 45,
+                "tables": [
+                    {
+                        "name": "customers",
+                        "table_type": "customer_table",
+                        "row_count": 10000,
+                        "columns": [
+                            {
+                                "name": "customer_id",
+                                "data_type": "identifier",
+                                "is_primary_key": True,
+                                "is_unique": True,
+                                "description": "Customer identifier - primary business key"
+                            },
+                            {
+                                "name": "email",
+                                "data_type": "email",
+                                "is_nullable": False,
+                                "sample_values": ["john@example.com", "jane@company.com"],
+                                "description": "Email address field - for communication"
+                            }
+                        ],
+                        "primary_keys": ["customer_id"],
+                        "indexes": [
+                            {
+                                "name": "idx_email",
+                                "is_unique": True,
+                                "columns": [{"column_name": "email"}]
+                            }
+                        ]
+                    }
+                ],
+                "metadata": {
+                    "database_name": "ecommerce_db",
+                    "business_context": "ecommerce_database",
+                    "database_engine": "MySQL"
+                }
+            }
+            
+            print("Example MySQL schema extraction output:")
+            print(json.dumps(example_output, indent=2))
+            
+            print("\nKey Features:")
+            print("- Semantic type inference (email, currency, identifier)")
+            print("- Business context detection (ecommerce, CRM, etc.)")
+            print("- Relationship mapping (foreign keys, indexes)")
+            print("- Sample data collection for LLM context")
+            print("- Performance statistics and constraints")
+            
+        except Exception as e:
+            print(f"Error: {e}")
+    
+    asyncio.run(test_mysql_extractor())

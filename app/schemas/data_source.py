@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any
 from pydantic import BaseModel, Field, field_validator, model_validator, FileUrl, PostgresDsn, MySQLDsn, MongoDsn
 from .enum import DataSourceType
 
@@ -170,6 +170,7 @@ class DataSourceResponse(BaseModel):
     data_source_url: str = Field(..., description="URL of the data source")
     data_source_created_at: datetime
     data_source_updated_at: datetime
+    data_source_schema: Optional[Dict[str, Any]] = Field(None, description="Schema of the data source")
 
     class Config:
         from_attributes = True
@@ -191,6 +192,11 @@ class DataSourceDeleteResponse(BaseModel):
     """Response schema for data source deletion"""
     message: str
 
+
+class DataSourceSchemaRefreshResponse(BaseModel):
+    """Response schema for data source schema refresh"""
+    message: str
+    data_source: DataSourceResponse
 
 class DataSourceListResponse(BaseModel):
     """Response schema for data source list"""
@@ -214,4 +220,30 @@ class DataSourcePaginatedListResponse(BaseModel):
     message: str
     data_sources: List[DataSourceResponse]
     pagination: PaginationMetadata
+
+class DataSourceSchemaExtractionResponse(BaseModel):
+    """Response model for schema extraction endpoint"""
+    message: str
+    data_source_name: str
+    data_source_type: str
+    data_source_url: str
+    # extracted_schema: Dict[str, Any] = Field(..., description="Extracted schema from the data source")
+    extracted_schema: str = Field(..., description="Extracted schema from the data source")
+    llm_description: Any = Field(..., description="LLM-optimized description of the schema")
+    file_metadata: Optional[Dict[str, Any]] = Field(None, description="Metadata about uploaded file")
+    temp_file_identifier: Optional[str] = Field(None, description="Redis-based temporary file identifier")
+
+    class Config:
+        from_attributes = True
+
+class DataSourceCreateWithSchemaRequest(BaseModel):
+    """Request model for creating data source with approved schema"""
+    data_source_name: str
+    data_source_type: DataSourceType
+    data_source_url: str
+    final_schema: Dict[str, Any]  # User-approved schema with descriptions
+    temp_file_identifier: Optional[str] = None  # Reference to Redis-stored file
+
+    class Config:
+        from_attributes = True
 

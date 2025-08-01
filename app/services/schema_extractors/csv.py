@@ -1,416 +1,397 @@
+from . import BaseSchemaExtractor, DataSourceSchema, DataType, ColumnSchema, TableSchema
 import pandas as pd
-import numpy as np
-import json
-from typing import Dict, Any, Optional, Union
 import io
-import asyncio
+from typing import List, Optional, Tuple, Dict, Any
 
-from fastapi import UploadFile
 
-async def extract_csv_schema(
-    upload_file: UploadFile, 
-    sample_size: Optional[int] = None,
-    delimiter: str = ',',
-    encoding: str = 'utf-8'
-) -> str:
-    """
-    Extracts schema information from a FastAPI UploadFile object and returns it as JSON.
+class CSVSchemaExtractor(BaseSchemaExtractor):
+    """CSV-specific schema extractor"""
     
-    Args:
-        upload_file (UploadFile): FastAPI UploadFile object containing CSV data
-        sample_size (int, optional): Number of rows to analyze (None for all rows)
-        delimiter (str): CSV delimiter (default: ',')
-        encoding (str): Content encoding (default: 'utf-8')
+    def __init__(self, sample_data_limit: int = 100):
+        self.sample_data_limit = sample_data_limit
     
-    Returns:
-        str: JSON string containing the CSV schema information
+    async def extract_schema(self, upload_file, **kwargs) -> DataSourceSchema:
+        """
+        Extract unified schema from CSV file.
         
-    Raises:
-        ValueError: If file is not a CSV or is empty
-        Exception: For other pandas reading errors
-    """
-    
-    try:
-        # Get file info
-        file_name = upload_file.filename or "uploaded_file.csv"
-        content_type = getattr(upload_file, 'content_type', 'text/csv')
-        
-        # Validate content type (optional)
-        if content_type and not any(ct in content_type.lower() for ct in ['csv', 'text', 'plain']):
-            print(f"Warning: Content type '{content_type}' may not be CSV")
-        
-        # Read file content
-        file_content = await upload_file.read()
-        
-        # Reset file position for potential future reads
-        await upload_file.seek(0)
-        
-        # Handle both bytes and string content
-        if isinstance(file_content, bytes):
+        Args:
+            upload_file: FastAPI UploadFile containing CSV data
+            **kwargs: Additional options (include_sample_data, etc.)
+            
+        Returns:
+            DataSourceSchema: Unified schema representation
+        """
+        try:
+            # Read file content
+            file_content = await upload_file.read()
+            await upload_file.seek(0)
+            
+            if not file_content:
+                raise ValueError("CSV file is empty")
+            
+            # Decode content with proper encoding detection
             try:
-                # Decode bytes to string
-                csv_content = file_content.decode(encoding)
+                csv_content = file_content.decode('utf-8')
             except UnicodeDecodeError:
-                # Try common encodings if specified encoding fails
-                for fallback_encoding in ['utf-8', 'latin1', 'cp1252']:
-                    try:
-                        csv_content = file_content.decode(fallback_encoding)
-                        encoding = fallback_encoding  # Update encoding for reference
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                else:
-                    raise ValueError(f"Could not decode file with encoding: {encoding}")
-        else:
-            csv_content = file_content
+                try:
+                    csv_content = file_content.decode('latin1')
+                except UnicodeDecodeError:
+                    csv_content = file_content.decode('utf-8', errors='ignore')
+            
+            if not csv_content.strip():
+                raise ValueError("CSV file contains no data")
+            
+            # Parse CSV with robust settings
+            try:
+                df = pd.read_csv(
+                    io.StringIO(csv_content),
+                    encoding=None,  # Let pandas auto-detect
+                    sep=None,       # Let pandas auto-detect separator
+                    engine='python', # More flexible parser
+                    skip_blank_lines=True,
+                    na_values=['', ' ', 'NULL', 'null', 'None', 'N/A', 'n/a']
+                )
+            except Exception as e:
+                # Try with explicit comma separator as fallback
+                try:
+                    df = pd.read_csv(
+                        io.StringIO(csv_content),
+                        sep=',',
+                        encoding='utf-8',
+                        skip_blank_lines=True,
+                        na_values=['', ' ', 'NULL', 'null', 'None', 'N/A', 'n/a']
+                    )
+                except Exception:
+                    raise ValueError(f"Could not parse CSV file: {e}")
+            
+            if df.empty:
+                raise ValueError("CSV file contains no data rows")
+            
+            if len(df.columns) == 0:
+                raise ValueError("CSV file contains no columns")
+            
+            # Clean column names (strip whitespace)
+            df.columns = df.columns.str.strip()
+            
+            # Analyze each column
+            columns = []
+            include_sample_data = kwargs.get('include_sample_data', True)
+            
+            for col_name in df.columns:
+                column = self._create_column_schema(df, col_name, include_sample_data)
+                columns.append(column)
+            
+            # Determine table type
+            table_type = self._determine_table_type(upload_file.filename or "csv_data", columns)
+            
+            # Create table schema
+            table = TableSchema(
+                name=upload_file.filename or "csv_data",
+                columns=columns,
+                row_count=len(df),
+                table_type=table_type,
+                description=self._generate_table_description(upload_file.filename or "csv_data", columns, len(df))
+            )
+            
+            # Calculate metadata
+            file_size_mb = len(file_content) / (1024 * 1024)
+            business_context = self._infer_business_context([table])
+            
+            return DataSourceSchema(
+                source_name=upload_file.filename or "uploaded_csv",
+                source_type="csv",
+                tables=[table],
+                metadata={
+                    "file_size_mb": round(file_size_mb, 2),
+                    "business_context": business_context,
+                    "encoding_used": "utf-8",
+                    "separator_detected": ",",
+                    "total_rows": len(df),
+                    "has_header": True
+                }
+            )
+            
+        except Exception as e:
+            raise Exception(f"Error extracting CSV schema: {e}")
+    
+    def _create_column_schema(self, df: pd.DataFrame, col_name: str, include_sample_data: bool) -> ColumnSchema:
+        """Create ColumnSchema from pandas column"""
+        col_data = df[col_name]
         
-        if not csv_content.strip():
-            raise ValueError("File is empty")
+        # Map pandas type to unified type
+        data_type = self._map_pandas_type_to_unified(col_data)
         
-        # Read CSV content using StringIO
-        df = pd.read_csv(
-            io.StringIO(csv_content),
-            delimiter=delimiter,
-            nrows=sample_size,
-            low_memory=False
+        # Get sample data and statistics
+        sample_values = []
+        value_stats = {}
+        
+        if include_sample_data:
+            sample_values, value_stats = self._get_column_sample_data(col_data, data_type)
+        
+        # Infer semantic type
+        semantic_type = self._infer_semantic_type(col_name, data_type, sample_values)
+        
+        # Create column schema
+        column = ColumnSchema(
+            name=col_name,
+            data_type=semantic_type,
+            original_type=str(col_data.dtype),
+            is_nullable=col_data.isnull().any(),
+            sample_values=sample_values[:3],  # Limit to 3 samples
+            value_count=len(col_data),
+            null_count=int(col_data.isnull().sum()),
+            unique_count=int(col_data.nunique()),
+            description=self._generate_column_description(col_name, semantic_type, col_data)
         )
         
-        if df.empty:
-            raise ValueError("CSV file contains no data")
+        # Set constraints
+        constraints = []
+        if not column.is_nullable:
+            constraints.append('NOT_NULL')
         
-        # Initialize schema structure
-        schema_info = {
-            "file_info": {
-                "file_name": file_name,
-            },
-            "data_info": {
-                "total_rows": len(df),
-                "total_columns": len(df.columns),
-                "sample_size": sample_size if sample_size else len(df),
-            },
-            "columns": {},
-        }
+        # Check uniqueness
+        if column.unique_count == column.value_count and column.null_count == 0:
+            column.is_unique = True
+            constraints.append('UNIQUE')
         
-        # Analyze each column
-        for column in df.columns:
-            col_data = df[column]
-            column_info = _analyze_column(col_data)
-            schema_info["columns"][column] = column_info
+        # Detect potential primary keys
+        if column.is_unique and any(keyword in col_name.lower() for keyword in ['id', 'key', 'pk']):
+            column.is_primary_key = True
+            constraints.append('PRIMARY_KEY_CANDIDATE')
         
-        return json.dumps(schema_info, indent=2, default=str)
+        # Set constraints
+        column.constraints = constraints if constraints else None
         
-    except Exception as e:
-        raise Exception(f"Error processing uploaded file: {e}")
-
-# Synchronous version for non-async contexts
-def extract_csv_schema_sync(
-    file_content: Union[str, bytes], 
-    file_name: str = "uploaded_file.csv",
-    sample_size: Optional[int] = None,
-    delimiter: str = ',',
-    encoding: str = 'utf-8'
-) -> str:
-    """
-    Synchronous version for when you already have the file content.
+        # Add type-specific statistics from sample data
+        if value_stats:
+            column.min_value = value_stats.get('min_value')
+            column.max_value = value_stats.get('max_value')
+            column.avg_value = value_stats.get('avg_value')
+            column.min_length = value_stats.get('min_length')
+            column.max_length = value_stats.get('max_length')
+            column.avg_length = value_stats.get('avg_length')
+        
+        return column
     
-    Args:
-        file_content (Union[str, bytes]): File content as string or bytes
-        file_name (str): Name of the file for reference
-        sample_size (int, optional): Number of rows to analyze (None for all rows)
-        delimiter (str): CSV delimiter (default: ',')
-        encoding (str): Content encoding (default: 'utf-8')
-    
-    Returns:
-        str: JSON string containing the CSV schema information
-    """
-    
-    try:
-        # Handle bytes content
-        if isinstance(file_content, bytes):
-            try:
-                csv_content = file_content.decode(encoding)
-            except UnicodeDecodeError:
-                # Try common encodings
-                for fallback_encoding in ['utf-8', 'latin1', 'cp1252']:
-                    try:
-                        csv_content = file_content.decode(fallback_encoding)
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                else:
-                    raise ValueError(f"Could not decode content with encoding: {encoding}")
+    def _map_pandas_type_to_unified(self, col_data: pd.Series) -> DataType:
+        """Map pandas data types to unified DataType enum"""
+        dtype_str = str(col_data.dtype).lower()
+        
+        # Integer types
+        if pd.api.types.is_integer_dtype(col_data):
+            return DataType.INTEGER
+        
+        # Float types
+        elif pd.api.types.is_float_dtype(col_data):
+            return DataType.DECIMAL
+        
+        # Boolean types
+        elif pd.api.types.is_bool_dtype(col_data):
+            return DataType.BOOLEAN
+        
+        # Datetime types
+        elif pd.api.types.is_datetime64_any_dtype(col_data):
+            return DataType.DATETIME
+        
+        # String/Object types
+        elif pd.api.types.is_string_dtype(col_data) or pd.api.types.is_object_dtype(col_data):
+            return DataType.TEXT
+        
         else:
-            csv_content = file_content
+            return DataType.UNKNOWN
+    
+    def _get_column_sample_data(self, col_data: pd.Series, data_type: DataType) -> Tuple[List[str], Dict[str, Any]]:
+        """Get sample data and statistics for a column"""
+        try:
+            # Get non-null values for sampling
+            non_null_data = col_data.dropna()
+            
+            # Sample values (limit to avoid memory issues)
+            sample_size = min(self.sample_data_limit, len(non_null_data))
+            sample_values = [str(val) for val in non_null_data.head(sample_size).tolist() if val is not None]
+            
+            # Basic statistics
+            value_stats = {
+                'total_count': len(col_data),
+                'null_count': int(col_data.isnull().sum()),
+                'unique_count': int(col_data.nunique())
+            }
+            
+            # Add type-specific statistics
+            if data_type in [DataType.INTEGER, DataType.DECIMAL, DataType.CURRENCY] and not non_null_data.empty:
+                try:
+                    numeric_data = pd.to_numeric(non_null_data, errors='coerce').dropna()
+                    if not numeric_data.empty:
+                        value_stats.update({
+                            'min_value': float(numeric_data.min()),
+                            'max_value': float(numeric_data.max()),
+                            'avg_value': float(numeric_data.mean())
+                        })
+                except Exception:
+                    pass  # Skip numeric stats if conversion fails
+            
+            elif data_type == DataType.TEXT and not non_null_data.empty:
+                try:
+                    str_lengths = non_null_data.astype(str).str.len()
+                    value_stats.update({
+                        'min_length': int(str_lengths.min()),
+                        'max_length': int(str_lengths.max()),
+                        'avg_length': float(str_lengths.mean())
+                    })
+                except Exception:
+                    pass  # Skip text stats if calculation fails
+            
+            return sample_values, value_stats
+            
+        except Exception as e:
+            print(f"Warning: Could not get sample data for column: {e}")
+            return [], {}
+    
+    def _determine_table_type(self, filename: str, columns: List[ColumnSchema]) -> str:
+        """Determine the business type of the table"""
+        filename_lower = filename.lower() if filename else ""
         
-        if not csv_content.strip():
-            raise ValueError("Content is empty")
+        # Check filename patterns
+        if any(pattern in filename_lower for pattern in ['customer', 'client']):
+            return 'customer_data'
+        elif any(pattern in filename_lower for pattern in ['order', 'transaction', 'sales']):
+            return 'transaction_data'
+        elif any(pattern in filename_lower for pattern in ['product', 'inventory', 'catalog']):
+            return 'product_data'
+        elif any(pattern in filename_lower for pattern in ['employee', 'staff']):
+            return 'employee_data'
+        elif any(pattern in filename_lower for pattern in ['export', 'report']):
+            return 'report_data'
         
-        # Read CSV content
-        df = pd.read_csv(
-            io.StringIO(csv_content),
-            delimiter=delimiter,
-            nrows=sample_size,
-            low_memory=False
-        )
+        # Check column patterns
+        column_names = [col.name.lower() for col in columns]
+        if any('customer' in name for name in column_names):
+            return 'customer_data'
+        elif any('order' in name or 'transaction' in name for name in column_names):
+            return 'transaction_data'
+        elif any('product' in name for name in column_names):
+            return 'product_data'
+        elif len(columns) > 20:
+            return 'detailed_data'
+        else:
+            return 'csv_data'
+    
+    def _generate_table_description(self, filename: str, columns: List[ColumnSchema], row_count: int) -> str:
+        """Generate comprehensive table description"""
+        desc_parts = [f"CSV file '{filename}' with {len(columns)} columns and {row_count:,} rows"]
         
-        if df.empty:
-            raise ValueError("CSV content contains no data")
+        # Add business context
+        id_cols = [col for col in columns if col.data_type == DataType.IDENTIFIER]
+        if id_cols:
+            desc_parts.append(f"Contains identifiers: {', '.join(col.name for col in id_cols)}")
         
-        # Initialize schema structure
-        schema_info = {
-            "file_info": {
-                "file_name": file_name,
-            },
-            "data_info": {
-                "total_rows": len(df),
-                "total_columns": len(df.columns),
-                "sample_size": sample_size if sample_size else len(df),
-            },
-            "columns": {},
-        }
+        currency_cols = [col for col in columns if col.data_type == DataType.CURRENCY]
+        if currency_cols:
+            desc_parts.append(f"Contains financial data: {', '.join(col.name for col in currency_cols)}")
         
-        # Analyze each column
-        for column in df.columns:
-            col_data = df[column]
-            column_info = _analyze_column(col_data)
-            schema_info["columns"][column] = column_info
+        date_cols = [col for col in columns if col.data_type in [DataType.DATE, DataType.DATETIME]]
+        if date_cols:
+            desc_parts.append(f"Contains temporal data: {', '.join(col.name for col in date_cols)}")
         
-        return json.dumps(schema_info, indent=2, default=str)
+        return " | ".join(desc_parts)
+    
+    def _generate_column_description(self, col_name: str, data_type: DataType, col_data: pd.Series) -> str:
+        """Generate business-focused column description"""
+        name_lower = col_name.lower()
         
-    except Exception as e:
-        raise Exception(f"Error processing content: {e}")
+        # Business context based on column name and type
+        if data_type == DataType.IDENTIFIER:
+            if 'customer' in name_lower:
+                return "Customer identifier for tracking and relationships"
+            elif 'order' in name_lower:
+                return "Order identifier for transaction tracking"
+            elif 'product' in name_lower:
+                return "Product identifier for catalog references"
+            else:
+                return "Unique identifier field for business operations"
+        
+        elif data_type == DataType.EMAIL:
+            return "Email address field for customer communication"
+        
+        elif data_type == DataType.CURRENCY:
+            if 'price' in name_lower:
+                return "Price information in monetary format"
+            elif 'total' in name_lower or 'amount' in name_lower:
+                return "Total monetary amount for calculations"
+            else:
+                return "Financial data in monetary format"
+        
+        elif data_type == DataType.CATEGORICAL:
+            unique_count = col_data.nunique()
+            return f"Categorical field with {unique_count} distinct values for classification"
+        
+        elif data_type in [DataType.DATE, DataType.DATETIME]:
+            if 'created' in name_lower:
+                return "Creation timestamp for audit trail"
+            elif 'updated' in name_lower or 'modified' in name_lower:
+                return "Last modification timestamp"
+            else:
+                return "Temporal data for chronological analysis"
+        
+        else:
+            return f"{data_type.value.title()} field for business operations"
+    
+    def _infer_business_context(self, tables: List[TableSchema]) -> str:
+        """Infer overall business context of the CSV file"""
+        if not tables:
+            return "csv_data"
+        
+        table = tables[0]  # CSV has only one table
+        column_names = [col.name.lower() for col in table.columns]
+        
+        # E-commerce patterns
+        if any('customer' in name for name in column_names) and any('order' in name for name in column_names):
+            return "ecommerce_data"
+        
+        # Customer data
+        elif any('customer' in name or 'client' in name for name in column_names):
+            return "customer_data"
+        
+        # Sales/Transaction data
+        elif any('sale' in name or 'transaction' in name or 'order' in name for name in column_names):
+            return "sales_transaction_data"
+        
+        # Product data
+        elif any('product' in name or 'item' in name for name in column_names):
+            return "product_inventory_data"
+        
+        # Financial data
+        elif any('amount' in name or 'price' in name or 'cost' in name for name in column_names):
+            return "financial_data"
+        
+        # Employee data
+        elif any('employee' in name or 'staff' in name for name in column_names):
+            return "employee_data"
+        
+        else:
+            return "business_data"
+    
+    def get_source_type(self) -> str:
+        return "csv"
 
-def _analyze_column(col_data: pd.Series) -> Dict[str, Any]:
-    """Analyze individual column characteristics."""
-    
-    total_count = len(col_data)
-    null_count = col_data.isnull().sum()
-    non_null_count = total_count - null_count
-    
-    column_info = {
-        "data_type": str(col_data.dtype),
-        "null_count": int(null_count),
-        "non_null_count": int(non_null_count),
-        "null_percentage": round((null_count / total_count) * 100, 2) if total_count > 0 else 0,
-        "unique_count": int(col_data.nunique()),
-        "unique_percentage": round((col_data.nunique() / total_count) * 100, 2) if total_count > 0 else 0,
-        "is_unique": col_data.nunique() == non_null_count and null_count == 0,
-    }
-    
-    # Add basic statistics for non-null values
-    if non_null_count > 0:
-        non_null_data = col_data.dropna()
-        
-        # For numeric columns
-        if pd.api.types.is_numeric_dtype(col_data):
-            column_info.update({
-                "min_value": float(non_null_data.min()) if not pd.isna(non_null_data.min()) else None,
-                "max_value": float(non_null_data.max()) if not pd.isna(non_null_data.max()) else None,
-                "mean": float(non_null_data.mean()) if not pd.isna(non_null_data.mean()) else None,
-                "median": float(non_null_data.median()) if not pd.isna(non_null_data.median()) else None,
-                "std_dev": float(non_null_data.std()) if not pd.isna(non_null_data.std()) else None,
-            })
-        
-        # For string/object columns
-        elif col_data.dtype == 'object':
-            str_lengths = non_null_data.astype(str).str.len()
-            column_info.update({
-                "min_length": int(str_lengths.min()),
-                "max_length": int(str_lengths.max()),
-                "avg_length": round(str_lengths.mean(), 2),
-                "sample_values": list(non_null_data.head(3).astype(str))
-            })
-        
-        # Add inferred type
-        column_info["inferred_type"] = _infer_type(non_null_data)
-    
-    return column_info
 
-def _infer_type(series: pd.Series) -> str:
-    """Infer more specific data types."""
-    
-    # Convert to string for pattern matching
-    str_series = series.astype(str)
-    
-    # Sample first 100 values for pattern detection
-    sample = str_series.head(100)
-    sample_size = len(sample)
-    
-    if sample_size == 0:
-        return "unknown"
-    
-    # Date patterns
-    date_patterns = [
-        r'^\d{4}-\d{2}-\d{2}$',  # YYYY-MM-DD
-        r'^\d{2}/\d{2}/\d{4}$',  # MM/DD/YYYY
-        r'^\d{2}-\d{2}-\d{4}$',  # MM-DD-YYYY
-    ]
-    
-    # DateTime patterns
-    datetime_patterns = [
-        r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}',  # YYYY-MM-DD HH:MM:SS
-        r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}',  # ISO format
-    ]
-    
-    # Email pattern
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    
-    # Phone pattern
-    phone_pattern = r'^[\+]?[1-9]?[\d\s\-\(\)]{10,}$'
-    
-    # URL pattern
-    url_pattern = r'^https?://[^\s/$.?#].[^\s]*$'
-    
-    # Check patterns (80% threshold for pattern match)
-    if any(sample.str.match(pattern).sum() / sample_size > 0.8 for pattern in datetime_patterns):
-        return "datetime"
-    elif any(sample.str.match(pattern).sum() / sample_size > 0.8 for pattern in date_patterns):
-        return "date"
-    elif sample.str.match(email_pattern).sum() / sample_size > 0.8:
-        return "email"
-    elif sample.str.match(phone_pattern).sum() / sample_size > 0.8:
-        return "phone"
-    elif sample.str.match(url_pattern).sum() / sample_size > 0.8:
-        return "url"
-    elif pd.api.types.is_numeric_dtype(series):
-        if series.dtype in ['int64', 'int32', 'int16', 'int8']:
-            return "integer"
-        elif series.dtype in ['float64', 'float32']:
-            # Check if it's actually integer values stored as float
-            if (series % 1 == 0).all():
-                return "integer_as_float"
-            return "decimal"
-    elif series.dtype == 'bool':
-        return "boolean"
-    elif series.dtype == 'object':
-        # Check if it's categorical-like (low unique ratio)
-        if series.nunique() / len(series) < 0.1:
-            return "categorical"
-        return "text"
-    
-    return str(series.dtype)
-
-# Example usage
-if __name__ == "__main__":
-    # Example CSV content for testing
-    csv_content = """id,name,email,age,salary,department,active
-1,John Doe,john@example.com,25,50000,Engineering,true
-2,Jane Smith,jane@example.com,30,60000,Marketing,true
-3,Bob Johnson,bob@example.com,35,55000,Sales,false
-4,Alice Brown,alice@example.com,28,52000,Engineering,true
-5,Charlie Wilson,charlie@example.com,32,58000,Marketing,true"""
-    
-    print("=== Testing Synchronous Version ===")
-    try:
-        # Test with string content
-        schema_json = extract_csv_schema_sync(csv_content, "employees.csv")
-        print("Schema extracted from string content:")
-        result = json.loads(schema_json)
-        print(f"File: {result['file_info']['file_name']}")
-        print(f"Rows: {result['data_info']['total_rows']}, Columns: {result['data_info']['total_columns']}")
-        print(f"Sample columns: {list(result['columns'].keys())[:3]}")
-        
-    except Exception as e:
-        print(f"Error: {e}")
-    
-    print("\n=== Testing with Bytes Content ===")
-    try:
-        # Test with bytes content
-        csv_bytes = csv_content.encode('utf-8')
-        schema_json = extract_csv_schema_sync(csv_bytes, "employees_bytes.csv")
-        result = json.loads(schema_json)
-        print(f"Schema extracted from bytes content:")
-        print(f"File: {result['file_info']['file_name']}")
-        print(f"Rows: {result['data_info']['total_rows']}")
-        
-    except Exception as e:
-        print(f"Error: {e}")
-    
-    # Mock FastAPI UploadFile for testing async version
-    print("\n=== Mock FastAPI UploadFile Test ===")
+# Helper function for testing
+async def extract_csv_schema_from_content(file_content: bytes, filename: str = "data.csv") -> DataSourceSchema:
+    """Extract schema from CSV file content bytes"""
     
     class MockUploadFile:
-        """Mock UploadFile for testing purposes"""
-        def __init__(self, content: bytes, filename: str, content_type: str = "text/csv"):
+        def __init__(self, content: bytes, filename: str):
             self.content = content
             self.filename = filename
-            self.content_type = content_type
-            self._position = 0
+            self.content_type = "text/csv"
         
         async def read(self) -> bytes:
             return self.content
         
         async def seek(self, position: int = 0) -> None:
-            self._position = position
+            pass
     
-    async def test_async_version():
-        try:
-            # Create mock upload file
-            mock_file = MockUploadFile(
-                content=csv_content.encode('utf-8'),
-                filename="uploaded_employees.csv",
-                content_type="text/csv"
-            )
-            
-            # Test async extraction
-            schema_json = await extract_csv_schema(mock_file)
-            result = json.loads(schema_json)
-            print("Schema extracted from mock UploadFile:")
-            print(f"File: {result['file_info']['file_name']}")
-            print(f"Rows: {result['data_info']['total_rows']}, Columns: {result['data_info']['total_columns']}")
-            
-            # Test with sample size
-            schema_json_sample = await extract_csv_schema(mock_file, sample_size=3)
-            result_sample = json.loads(schema_json_sample)
-            print(f"With sample size 3: {result_sample['data_info']['sample_size']} rows analyzed")
-            
-        except Exception as e:
-            print(f"Error in async test: {e}")
-    
-    # Run async test
-    asyncio.run(test_async_version())
-    
-    print("\n=== FastAPI Integration Example ===")
-    print("""
-# FastAPI endpoint example:
+    mock_file = MockUploadFile(file_content, filename)
+    extractor = CSVSchemaExtractor()
+    return await extractor.extract_schema(mock_file)
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
-import json
-
-app = FastAPI()
-
-@app.post("/analyze-csv/")
-async def analyze_csv_file(file: UploadFile = File(...)):
-    try:
-        # Validate file type
-        if not file.filename.endswith('.csv'):
-            raise HTTPException(status_code=400, detail="Only CSV files are allowed")
-        
-        # Extract schema
-        schema_json = await extract_csv_schema(file)
-        schema_data = json.loads(schema_json)
-        
-        return {
-            "status": "success",
-            "message": "CSV schema extracted successfully",
-            "schema": schema_data
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
-
-@app.post("/analyze-csv-sample/")
-async def analyze_csv_sample(file: UploadFile = File(...), sample_size: int = 1000):
-    try:
-        schema_json = await extract_csv_schema(file, sample_size=sample_size)
-        schema_data = json.loads(schema_json)
-        
-        return {
-            "status": "success",
-            "schema": schema_data,
-            "note": f"Analysis based on first {sample_size} rows"
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    """)

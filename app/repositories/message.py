@@ -2,16 +2,22 @@ import uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
+from boto3.dynamodb.conditions import Key, Attr
 from app.schemas.chat import MessageRole
 from app.core.utils import logger
+from app.config.dynamodb import get_dynamodb_connection
+from app.config.settings import get_settings
 
+
+settings = get_settings()
 
 class MessageRepository:
     """Repository class for handling Message DynamoDB operations."""
 
-    def __init__(self, dynamodb_client):
-        self.dynamodb = dynamodb_client
-        self.message_table_name = 'Messages'
+    def __init__(self):
+        """Initialize the message repository with DynamoDB connection."""
+        self.db_connection = get_dynamodb_connection()
+        self.messages_table = self.db_connection.get_table(settings.DYNAMODB_MESSAGES_TABLE)
     
     async def create_message(
         self,
@@ -43,32 +49,28 @@ class MessageRepository:
             now = datetime.now(timezone.utc).isoformat()
             
             item = {
-                'pk': {'S': f"SESSION#{session_id}"},
-                'sk': {'S': f"MSG#{message_index:06d}#{message_id}"},
-                'gsi1_pk': {'S': f"USER#{user_id}"},
-                'gsi1_sk': {'S': f"MSG#{now}#{message_id}"},
-                'message_id': {'S': message_id},
-                'session_id': {'S': session_id},
-                'user_id': {'N': str(user_id)},
-                'role': {'S': role.value},
-                'content': {'S': content},
-                'token_count': {'N': str(token_count)},
-                'message_index': {'N': str(message_index)},
-                'is_active': {'BOOL': True},
-                'created_at': {'S': now}
+                'pk': f"SESSION#{session_id}",
+                'sk': f"MSG#{message_index:06d}#{message_id}",
+                'gsi1_pk': f"USER#{user_id}",
+                'gsi1_sk': f"MSG#{now}#{message_id}",
+                'message_id': message_id,
+                'session_id': session_id,
+                'user_id': user_id,
+                'role': role.value,
+                'content': content,
+                'token_count': token_count,
+                'message_index': message_index,
+                'is_active': True,
+                'created_at': now
             }
             
             if parent_message_id:
-                item['parent_message_id'] = {'S': parent_message_id}
+                item['parent_message_id'] = parent_message_id
             
-            self.dynamodb.put_item(
-                TableName=self.message_table_name,
-                Item=item
-            )
+            self.messages_table.put_item(Item=item)
             
-            message = self._deserialize_message(item)
             logger.info(f"Message created successfully: {message_id}")
-            return message
+            return item
             
         except ClientError as e:
             logger.error(f"Error creating message: {e}")
@@ -90,21 +92,13 @@ class MessageRepository:
         """
         try:
             # Query all messages in the session to find the one with matching message_id
-            response = self.dynamodb.query(
-                TableName=self.message_table_name,
-                KeyConditionExpression='pk = :pk AND begins_with(sk, :sk_prefix)',
-                ExpressionAttributeValues={
-                    ':pk': {'S': f"SESSION#{session_id}"},
-                    ':sk_prefix': {'S': 'MSG#'}
-                }
+            response = self.messages_table.query(
+                KeyConditionExpression=Key('pk').eq(f"SESSION#{session_id}") & Key('sk').begins_with('MSG#'),
+                FilterExpression=Attr('message_id').eq(message_id)
             )
             
-            for item in response.get('Items', []):
-                message = self._deserialize_message(item)
-                if message['message_id'] == message_id:
-                    return message
-            
-            return None
+            items = response.get('Items', [])
+            return items[0] if items else None
             
         except ClientError as e:
             logger.error(f"Error getting message {message_id}: {e}")
@@ -127,25 +121,15 @@ class MessageRepository:
         """
         try:
             query_params = {
-                'TableName': self.message_table_name,
-                'KeyConditionExpression': 'pk = :pk AND begins_with(sk, :sk_prefix)',
-                'ExpressionAttributeValues': {
-                    ':pk': {'S': f"SESSION#{session_id}"},
-                    ':sk_prefix': {'S': 'MSG#'}
-                },
+                'KeyConditionExpression': Key('pk').eq(f"SESSION#{session_id}") & Key('sk').begins_with('MSG#'),
                 'ScanIndexForward': True  # Oldest first (by message_index)
             }
             
             if limit:
                 query_params['Limit'] = limit
             
-            response = self.dynamodb.query(**query_params)
-            
-            messages = []
-            for item in response.get('Items', []):
-                messages.append(self._deserialize_message(item))
-            
-            return messages
+            response = self.messages_table.query(**query_params)
+            return response.get('Items', [])
             
         except ClientError as e:
             logger.error(f"Error getting session messages for session {session_id}: {e}")
@@ -176,42 +160,39 @@ class MessageRepository:
             
             sk = f"MSG#{message['message_index']:06d}#{message_id}"
             
-            # Build update expression
-            update_expression = "SET"
+            # Build update expression dynamically
+            update_parts = []
             expression_values = {}
             
-            update_parts = []
             if 'content' in updates:
                 update_parts.append("content = :content")
-                expression_values[':content'] = {'S': updates['content']}
+                expression_values[':content'] = updates['content']
             if 'token_count' in updates:
                 update_parts.append("token_count = :token_count")
-                expression_values[':token_count'] = {'N': str(updates['token_count'])}
+                expression_values[':token_count'] = updates['token_count']
             if 'is_active' in updates:
                 update_parts.append("is_active = :is_active")
-                expression_values[':is_active'] = {'BOOL': updates['is_active']}
+                expression_values[':is_active'] = updates['is_active']
             
             if not update_parts:
                 return message
             
-            update_expression += " " + ", ".join(update_parts)
+            update_expression = "SET " + ", ".join(update_parts)
             
-            response = self.dynamodb.update_item(
-                TableName=self.message_table_name,
+            response = self.messages_table.update_item(
                 Key={
-                    'pk': {'S': f"SESSION#{session_id}"},
-                    'sk': {'S': sk}
+                    'pk': f"SESSION#{session_id}",
+                    'sk': sk
                 },
                 UpdateExpression=update_expression,
                 ExpressionAttributeValues=expression_values,
                 ReturnValues='ALL_NEW'
             )
             
-            if 'Attributes' not in response:
-                return None
-                
-            updated_message = self._deserialize_message(response['Attributes'])
-            logger.info(f"Message updated successfully: {message_id}")
+            updated_message = response.get('Attributes')
+            if updated_message:
+                logger.info(f"Message updated successfully: {message_id}")
+            
             return updated_message
             
         except ClientError as e:
@@ -286,11 +267,10 @@ class MessageRepository:
             
             for message in messages:
                 sk = f"MSG#{message['message_index']:06d}#{message['message_id']}"
-                self.dynamodb.delete_item(
-                    TableName=self.message_table_name,
+                self.messages_table.delete_item(
                     Key={
-                        'pk': {'S': f"SESSION#{session_id}"},
-                        'sk': {'S': sk}
+                        'pk': f"SESSION#{session_id}",
+                        'sk': sk
                     }
                 )
                 deleted_count += 1
@@ -383,28 +363,32 @@ class MessageRepository:
             logger.error(f"Error calculating total session tokens: {e}")
             raise
 
-    # ===============================
-    # Helper Methods
-    # ===============================
-    
-    def _deserialize_message(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert DynamoDB item to message dict."""
-        message = {
-            'message_id': item['message_id']['S'],
-            'session_id': item['session_id']['S'],
-            'user_id': int(item['user_id']['N']),
-            'role': item['role']['S'],
-            'content': item['content']['S'],
-            'token_count': int(item['token_count']['N']),
-            'message_index': int(item['message_index']['N']),
-            'is_active': item['is_active']['BOOL'],
-            'created_at': item['created_at']['S']
-        }
+    async def get_user_recent_messages(
+        self,
+        user_id: int,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Get recent messages for a user across all sessions using GSI1.
         
-        if 'parent_message_id' in item:
-            message['parent_message_id'] = item['parent_message_id']['S']
-        else:
-            message['parent_message_id'] = None
+        Args:
+            user_id: ID of the user
+            limit: Maximum number of messages to return
             
-        return message
+        Returns:
+            List of message dicts ordered by creation time (most recent first)
+        """
+        try:
+            response = self.messages_table.query(
+                IndexName='GSI1-User-Messages',
+                KeyConditionExpression=Key('gsi1_pk').eq(f"USER#{user_id}") & Key('gsi1_sk').begins_with('MSG#'),
+                Limit=limit,
+                ScanIndexForward=False  # Most recent first
+            )
+            
+            return response.get('Items', [])
+            
+        except ClientError as e:
+            logger.error(f"Error getting user recent messages for user {user_id}: {e}")
+            raise
 
