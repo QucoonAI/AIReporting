@@ -1,11 +1,19 @@
 import json
+import uuid
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Tuple
 import redis.asyncio as redis
 from . import RedisKeyManager
 from app.core.utils import logger
 
-
+# Solution 1: Custom JSON Encoder (Recommended)
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)  # or str(obj) if you need exact precision
+        return super().default(obj)
+    
 class ChatCacheService:
     """Chat session caching service with proper Redis key management"""
     
@@ -42,27 +50,51 @@ class ChatCacheService:
         total_tokens: int,
         session_info: Dict[str, Any]
     ) -> None:
-        """Update context, tokens, and session info in cache with token-based limits"""
+        """Update session data with activity-based TTL"""
         try:
+            # Validate messages are active
+            validated_messages = [
+                msg for msg in context_messages 
+                if msg.get('is_active', True)
+            ]
+            
             session_data = {
-                'context_messages': context_messages,
+                'context_messages': validated_messages,
                 'total_tokens': total_tokens,
                 'session_info': session_info,
-                'last_updated': datetime.now(timezone.utc).isoformat()
+                'last_updated': datetime.now(timezone.utc).isoformat(),
+                'message_count': len(validated_messages)
             }
+            
+            # Adaptive TTL based on activity
+            now = datetime.now(timezone.utc)
+            last_message_time = max(
+                (datetime.fromisoformat(msg['created_at'].replace('Z', '+00:00')) 
+                for msg in validated_messages),
+                default=now
+            )
+            
+            time_since_last = (now - last_message_time).total_seconds()
+            
+            # More recent activity = longer TTL
+            if time_since_last < 300:  # 5 minutes
+                ttl = 7200  # 2 hours
+            elif time_since_last < 1800:  # 30 minutes
+                ttl = 3600  # 1 hour
+            else:
+                ttl = 1800  # 30 minutes
             
             session_key = self.key_manager.chat_session_key(session_id)
             await self.redis_client.setex(
                 session_key,
-                self.context_ttl,
-                json.dumps(session_data, separators=(',', ':'))
+                ttl,
+                json.dumps(session_data, cls=DecimalEncoder, separators=(',', ':'))
             )
             
-            logger.debug(f"Updated session {session_id}: {len(context_messages)} messages, "
-                        f"{total_tokens} tokens, at_limit: {total_tokens >= self.default_max_tokens}")
+            logger.debug(f"Updated session {session_id} with adaptive TTL: {ttl}s")
             
         except Exception as e:
-            logger.error(f"Error updating session data in cache: {e}")
+            logger.error(f"Error updating session data with adaptive TTL: {e}")
 
     async def append_messages(
         self, 
@@ -182,4 +214,41 @@ class ChatCacheService:
                 "message_count": 0,
                 "can_send_messages": True
             }
+
+
+
+class TransactionalCacheService(ChatCacheService):
+    """Enhanced cache service with transactional operations"""
+    
+    async def begin_transaction(self, session_id: str) -> str:
+        """Begin a cache transaction and return transaction ID"""
+        transaction_id = str(uuid.uuid4())
+        backup_key = f"backup:{session_id}:{transaction_id}"
+        session_key = self.key_manager.chat_session_key(session_id)
+        
+        # Backup current state
+        current_data = await self.redis_client.get(session_key)
+        if current_data:
+            await self.redis_client.setex(backup_key, 300, current_data)  # 5 min TTL
+        
+        return transaction_id
+    
+    async def commit_transaction(self, session_id: str, transaction_id: str) -> None:
+        """Commit transaction and clean up backup"""
+        backup_key = f"backup:{session_id}:{transaction_id}"
+        await self.redis_client.delete(backup_key)
+    
+    async def rollback_transaction(self, session_id: str, transaction_id: str) -> None:
+        """Rollback cache to backup state"""
+        backup_key = f"backup:{session_id}:{transaction_id}"
+        session_key = self.key_manager.chat_session_key(session_id)
+        
+        backup_data = await self.redis_client.get(backup_key)
+        if backup_data:
+            await self.redis_client.setex(session_key, self.context_ttl, backup_data)
+        else:
+            await self.redis_client.delete(session_key)
+        
+        await self.redis_client.delete(backup_key)
+
 

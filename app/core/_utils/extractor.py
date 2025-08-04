@@ -4,11 +4,11 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from fastapi import UploadFile, HTTPException, status
 from app.core.utils import logger
-from .schema_extractors.postgres.main import PostgresSchemaExtractor
-from .schema_extractors.mysql import MySQLSchemaExtractor
-from .schema_extractors.mssql import MSSQLSchemaExtractor
-from .schema_extractors.mariadb import MariaDBSchemaExtractor
-from .schema_extractors.oracle import OracleSchemaExtractor
+from .db_classes.postgres.main import PostgresSchemaExtractor
+from .db_classes.mysql import MySQLSchemaExtractor
+from .db_classes.mssql import MSSQLSchemaExtractor
+from .db_classes.mariadb import MariaDBSchemaExtractor
+from .db_classes.oracle import OracleSchemaExtractor
 
 
 class ExtactorService:
@@ -621,6 +621,4 @@ class ExtactorService:
         except Exception as e:
             logger.error(f"Error extracting PDF schema: {e}")
             raise
-
-
 

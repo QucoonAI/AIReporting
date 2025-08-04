@@ -7,7 +7,7 @@ from app.config.redis import redis_manager
 from app.config.dynamodb import get_dynamodb_connection
 from app.core.exceptions import setup_exception_handling
 from app.core.utils import logger
-from app.routes import auth, user, data_source, chat
+from app.routes import auth, user, data_source, data_source_update, chat
 
 
 def create_application(lifespan=None):
@@ -15,6 +15,7 @@ def create_application(lifespan=None):
     application.include_router(user.router)
     application.include_router(auth.router)
     application.include_router(data_source.router)
+    application.include_router(data_source_update.router)
     application.include_router(chat.router)
     return application
 

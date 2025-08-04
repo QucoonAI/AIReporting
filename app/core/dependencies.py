@@ -8,7 +8,9 @@ from app.config.settings import get_settings
 from app.services.redis_managers.factory import RedisServiceFactory
 from app.services.background_services.email_service import EmailService
 from app.services.user import UserService
+from app.services.temp_data_source import TempDataSourceService
 from app.services.data_source import DataSourceService
+from app.services.data_source_update import DataSourceUpdateService
 from app.services.chat import ChatService
 from app.services.llm_services.llm import MockLLMService
 from app.repositories.user import UserRepository
@@ -19,7 +21,6 @@ from app.repositories.message import MessageRepository
 
 security = HTTPBearer()
 settings = get_settings()
-dynamodb_client = boto3.client('dynamodb', region_name=settings.REGION)
 
 
 def get_user_repo(db_session: SessionDep = SessionDep) -> UserRepository:  # type: ignore
@@ -31,11 +32,11 @@ def get_data_source_repo(db_session: SessionDep = SessionDep) -> DataSourceRepos
 
 def get_chat_repo() -> ChatRepository:
     """Dependency to get ChatRepository instance"""
-    return ChatRepository(dynamodb_client=dynamodb_client)
+    return ChatRepository()
 
 def get_message_repo() -> MessageRepository:
     """Dependency to get MessageRepository instance"""
-    return MessageRepository(dynamodb_client=dynamodb_client)
+    return MessageRepository()
 
 
 
@@ -57,12 +58,23 @@ def get_user_service(
         redis_factory=redis_factory,
     )
 
+async def get_temp_data_source_service(
+    redis_factory: RedisServiceFactory = Depends(get_redis_factory_service)
+) -> TempDataSourceService:
+    return TempDataSourceService(redis_factory)
+
 def get_data_source_service(
     data_source_repo: DataSourceRepository = Depends(get_data_source_repo),
-    redis_factory: RedisServiceFactory = Depends(get_redis_factory_service),
+    temp_service: TempDataSourceService = Depends(get_temp_data_source_service)
 ) -> DataSourceService:
     """Dependency to get DataSourceService instance"""
-    return DataSourceService(data_source_repo, redis_factory=redis_factory)
+    return DataSourceService(data_source_repo, temp_service)
+
+async def get_data_source_update_service(
+    data_source_service: DataSourceService = Depends(get_data_source_service),
+    temp_service: TempDataSourceService = Depends(get_temp_data_source_service)
+) -> DataSourceUpdateService:
+    return DataSourceUpdateService(data_source_service, temp_service)
 
 def get_llm_service() -> MockLLMService:
     """Dependency to get MockLLMService instance"""
@@ -77,6 +89,9 @@ def get_chat_service(
 ) -> ChatService:
     """Dependency to get ChatService instance"""
     return ChatService(chat_repo, message_repo, data_source_repo, llm_service, redis_factory)
+
+
+
 
 
 async def get_current_user(

@@ -315,7 +315,8 @@ class GeneralExceptionHandler:
     @staticmethod
     async def handle_general_exception(request: Request, exc: Exception) -> JSONResponse:
         """Handle unexpected exceptions"""
-        logger.error(f"Unexpected error: {str(exc)}", exc_info=True)
+        logger.error(f"Exception occurred in: {exc.__tracexcback__.tb_frame.f_code.co_filename}:{exc.__traceback__.tb_lineno}")
+
         
         error_response = ErrorResponse.create_error_response(
             message="An unexpected error occurred. Please try again later.",

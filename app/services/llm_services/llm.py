@@ -38,7 +38,7 @@ class MockLLMService:
         Mock token calculation - roughly 4 characters per token
         In a real implementation, you'd use a proper tokenizer
         """
-        return max(1, len(text) // 4)
+        return max(1, len(text) // 6)
     
     def _get_context_response(self, data_source_type: str) -> str:
         """Get a context-aware response based on data source type"""
@@ -87,7 +87,7 @@ class MockLLMService:
             "token_count": token_count,
             "model": "mock-llm-v1",
             "processing_time": random.uniform(0.5, 2.0),
-            "timestamp": datetime.utcnow()
+            "timestamp": datetime.now(timezone.utc)
         }
     
     async def generate_response_with_context(
@@ -95,7 +95,6 @@ class MockLLMService:
         message: str,
         conversation_history: list = None,
         data_source_info: Dict[str, Any] = None,
-        user_preferences: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """
         Generate response with full context (for more sophisticated interactions)
@@ -104,7 +103,6 @@ class MockLLMService:
             message: Current user message
             conversation_history: Previous messages in the conversation
             data_source_info: Information about the connected data source
-            user_preferences: User-specific preferences or settings
             
         Returns:
             Dictionary with response content and metadata

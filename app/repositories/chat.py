@@ -2,7 +2,7 @@ import uuid
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
-from boto3.dynamodb.conditions import Key, Attr
+from boto3.dynamodb.conditions import Key
 from app.core.utils import logger
 from app.config.dynamodb import get_dynamodb_connection
 from app.config.settings import get_settings
@@ -301,3 +301,4 @@ class ChatRepository:
         except ClientError as e:
             logger.error(f"Error getting data source ID for session {session_id}: {e}")
             raise
+

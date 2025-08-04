@@ -3,7 +3,6 @@ import anthropic
 from app.core.utils import bedrock, read_from_sql_db, read_from_mongo_db
 
 
-client = anthropic.Anthropic()
 modelId = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
 with open("app/config/prompts.yaml", "r") as file:
@@ -13,6 +12,7 @@ DEFAULT_SYSTEM_PROMPT = prompts["system_prompt"]
 SCHEMA_SYSTEM_PROMPT = prompts["schema_prompt"]
 INITIAL_SYSTEM_PROMPT = prompts["initial_system_prompt"]
 FINAL_SYSTEM_PROMPT = prompts["final_system_prompt"]
+
 
 tool_list = [
     {
@@ -156,15 +156,15 @@ class AIQuery:
         tools=tool_list,
         initial_tool_list=initial_tool_list,
         system_prompt=DEFAULT_SYSTEM_PROMPT,
-        SCHEMA_SYSTEM_PROMPT=SCHEMA_SYSTEM_PROMPT,
-        INITIAL_SYSTEM_PROMPT=INITIAL_SYSTEM_PROMPT,
-        FINAL_SYSTEM_PROMPT=FINAL_SYSTEM_PROMPT,
+        schema_system_prompt=SCHEMA_SYSTEM_PROMPT,
+        initial_system_prompt=INITIAL_SYSTEM_PROMPT,
+        final_system_prompt=FINAL_SYSTEM_PROMPT,
     ):
         self.tools = tools
         self.sys_prompts = system_prompt
-        self.schema = SCHEMA_SYSTEM_PROMPT
-        self.initial_prompt = INITIAL_SYSTEM_PROMPT
-        self.final_prompt = FINAL_SYSTEM_PROMPT
+        self.schema = schema_system_prompt
+        self.initial_prompt = initial_system_prompt
+        self.final_prompt = final_system_prompt
         self.initial_tools = initial_tool_list
 
     def initial_processor(self, context, memory):
@@ -180,6 +180,7 @@ class AIQuery:
                     },
                 ],
             }
+
             response = bedrock.converse(
                 modelId=modelId,
                 messages=[message],
@@ -239,25 +240,13 @@ class AIQuery:
                 system=[
                     {
                         "text": self.sys_prompts
-                    },  # Note: DEFAULT_SYSTEM_PROMPT needs to be defined
+                    }, 
                 ],
                 inferenceConfig={"maxTokens": 2000, "temperature": 0},
                 toolConfig={"tools": self.tools},  # Note: tool_list needs to be defined
             )
-
-            response_message = response["output"]["message"]
-            response_content_blocks = response_message["content"]
-
-            content_block = next(
-                (block for block in response_content_blocks if "toolUse" in block), None
-            )
-
-            if content_block is None:
-                # Handle case where no toolUse block is found
-                exception = True
-                return exception, "No toolUse block found in response"
-
-            tool_use_block = content_block["toolUse"]
+            
+            tool_use_block = response['output']['message']['content'][1]['toolUse']
             tool_result_dict = tool_use_block["input"]
 
             # Replace all "<UNKNOWN>" with None in the dictionary
@@ -270,7 +259,8 @@ class AIQuery:
 
         except Exception as e:
             exception = True
-            return exception, str(e)
+            raise
+            # return exception, str(e)
 
     def final_processor(self, user_message, context):
         try:
@@ -330,56 +320,38 @@ class AIQuery:
         except Exception as e:
             exception = True
             return exception, str(e)
-
+    
     def agentic_call(self, message, db_creds=None):
-        agent_call = self.extract_json(message)
+        data_source_schema = db_creds["schema"]
+        data_source_url = db_creds["url"]
+        exception, agent_call = self.extract_json(message, data_source_schema)
         agent_type = agent_call.get("requestType")
+        
         if agent_type == "query_response":
             data_source = agent_call.get("dataSource")
             query_type = agent_call.get("queryType")
             if data_source == "MySQL" and query_type == "sql":
                 query = agent_call.get("query")
-                query_result = read_from_sql_db(query, db_creds)
+                query_result = read_from_sql_db(query, data_source_url)
                 return query_result, query_type
             elif data_source == "MongoDB" and query_type == "mongodb":
                 query = agent_call.get("query")
-                query_result = read_from_mongo_db(query, db_creds)
+                query_result = read_from_mongo_db(query, data_source_url)
                 return query_result, query_type
             elif data_source == "PostgreSQL" and query_type == "sql":
                 query = agent_call.get("query")
-                query_result = read_from_sql_db(query, db_creds)
+                query_result = read_from_sql_db(query, data_source_url)
                 return query_result, query_type
-        elif agent_type == "generic_response" and query_type == "text":
-            response = agent_call.get("response")
-            return response, query_type
+        elif agent_type == "generic_response":
+            query_type = agent_call.get("queryType", "text")
+            if query_type == "text":
+                response = agent_call.get("response")
+                return response, query_type
         else:
             raise ValueError("Invalid request type in agent call response")
+        
         return None
+    
+    def token_count(self, text: str) -> int:
+        return max(1, len(text) // 6)
 
-    def token_count(self, message):
-        response = client.messages.count_tokens(
-            model=modelId,
-            system="",
-            messages=[{"role": "user", "content": message}],
-        )
-        count = response["input_tokens"]
-        return count
-
-
-# # Example usage with proper initialization
-# if __name__ == "__main__":
-#     database_schema = """inventory_id INT PRIMARY KEY AUTO_INCREMENT,
-#         product_id INT NOT NULL,
-#         quantity_on_hand INT NOT NULL DEFAULT 0,
-#         quantity_reserved INT DEFAULT 0, -- for pending orders
-#         last_restock_date DATE,
-#         expiry_date DATE,
-#         location VARCHAR(50), -- aisle, shelf location
-#         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"""
-
-#     context = f"Hello, I need the number of products in the inventory that are currently available for sale. schema: {database_schema}"
-
-#     # Create instance and call method
-#     ai_query = AIQuery(tools=tool_list, system_prompt=DEFAULT_SYSTEM_PROMPT)
-#     result = ai_query.extract_json(context)
-#     print(result)

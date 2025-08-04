@@ -1,6 +1,7 @@
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Path
 from app.services.data_source import DataSourceService
+from app.services.temp_data_source import TempDataSourceService
 from app.schemas.data_source import (
     DataSourceUpdateRequest,
     DataSourceCreateResponse,
@@ -9,18 +10,19 @@ from app.schemas.data_source import (
     DataSourceResponse,
     DataSourcePaginatedListResponse,
     PaginationMetadata,
-    DataSourceSchemaRefreshResponse,
     DataSourceSchemaExtractionResponse,
     DataSourceCreateWithSchemaRequest,
+    PendingExtractionResponse,
+    PendingExtractionListResponse
 )
 from app.schemas.enum import DataSourceType
 from app.models.user import User
-from app.core.dependencies import get_current_user, get_data_source_service
+from app.core.dependencies import get_current_user, get_data_source_service, get_temp_data_source_service
 from app.core.utils import logger
+from .data_source_update import router as updates_router
 
 
 router = APIRouter(prefix="/api/v1/data-sources", tags=["Data Sources"])
-
 
 @router.put("/{data_source_id}", response_model=DataSourceUpdateResponse)
 async def update_data_source(
@@ -169,46 +171,6 @@ async def delete_data_source(
         )
 
 
-@router.patch("/{data_source_id}/refresh-schema", response_model=DataSourceSchemaRefreshResponse)
-async def refresh_data_source_schema(
-    data_source_id: int,
-    service: DataSourceService = Depends(get_data_source_service),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Refresh the schema of an existing data source.
-    
-    This endpoint re-extracts the schema from the data source (file or database)
-    and updates the stored schema information. Useful when the underlying data
-    structure has changed.
-    """
-    try:
-        # Check if data source belongs to current user
-        existing_data_source = await service.get_data_source_by_id(data_source_id)
-        if existing_data_source.data_source_user_id != current_user["user_id"]:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You don't have permission to refresh this data source schema"
-            )
-
-        # Refresh the schema
-        updated_data_source = await service.refresh_data_source_schema(data_source_id)
-
-        return DataSourceSchemaRefreshResponse(
-            message="Data source schema refreshed successfully",
-            data_source=DataSourceResponse.model_validate(updated_data_source)
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error refreshing schema for data source {data_source_id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to refresh data source schema"
-        )
-
-
 @router.post("/upload-extract", response_model=DataSourceSchemaExtractionResponse, status_code=status.HTTP_200_OK)
 async def upload_and_extract_schema(
     data_source_name: str = Form(...),
@@ -216,16 +178,14 @@ async def upload_and_extract_schema(
     data_source_url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     service: DataSourceService = Depends(get_data_source_service),
+    temp_service: TempDataSourceService = Depends(get_temp_data_source_service),
     current_user: User = Depends(get_current_user)
 ):
     """
     Upload file and extract schema without saving to database or S3.
-    File is temporarily stored in Redis for the creation step.
+    Extraction result is cached in Redis for later creation.
     
-    For file-based data sources (CSV, XLSX, PDF), upload the file.
-    For database connections, provide the connection URL.
-    
-    Returns the extracted schema for user review and modification.
+    Returns the extracted schema with temp_identifier for user review.
     """
     try:
         # Validate inputs
@@ -254,18 +214,38 @@ async def upload_and_extract_schema(
                     detail=f"File should not be provided for URL-based data source type {data_source_type.value}"
                 )
 
-        # Extract schema (and store file in Redis if applicable)
-        result = await service.upload_and_extract_schema(
+        # Extract schema using the service
+        extraction_result = await service.upload_and_extract_schema(
             user_id=current_user["user_id"],
             data_source_name=data_source_name,
             data_source_type=data_source_type.value,
             data_source_url=data_source_url,
             file=file
         )
+        
+        # Get file content for caching if it's a file-based source
+        file_content = None
+        if file and data_source_type in file_based_types:
+            await file.seek(0)  # Reset file pointer
+            file_content = await file.read()
+        
+        # Store in temporary cache
+        temp_identifier = await temp_service.store_extraction(
+            user_id=current_user["user_id"],
+            data_source_name=data_source_name,
+            extraction_result=extraction_result,
+            file_content=file_content
+        )
+        
+        # Add temp_identifier to the response
+        response_data = {
+            **extraction_result,
+            "temp_identifier": temp_identifier
+        }
 
         return DataSourceSchemaExtractionResponse(
-            message="Schema extracted successfully. Please review and add descriptions before creating the data source.",
-            **result
+            message="Schema extracted successfully. Please review and modify the description before creating the data source.",
+            **response_data
         )
 
     except HTTPException:
@@ -278,30 +258,26 @@ async def upload_and_extract_schema(
         )
 
 
-@router.post("/create-with-schema", response_model=DataSourceCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/create/{temp_identifier}", response_model=DataSourceCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_data_source_with_schema(
     request: DataSourceCreateWithSchemaRequest,
+    temp_identifier: str = Path(..., description="Temporary identifier from schema extraction"),
     service: DataSourceService = Depends(get_data_source_service),
+    temp_service: TempDataSourceService = Depends(get_temp_data_source_service),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Create a data source with user-approved schema.
+    Create a data source using previously extracted schema.
     
-    For file-based sources, retrieves the temporarily stored file from Redis
-    and uploads it to S3 during creation.
-    
-    This endpoint should be called after /upload-extract with the final
-    schema that includes user-added descriptions and modifications.
+    The temp_identifier should be obtained from the /upload-extract endpoint.
+    For file-based sources, this will upload the file to S3 during creation.
     """
     try:
-        # Create data source with final schema
-        created_data_source = await service.create_data_source_with_schema(
+        # Create data source using the enhanced service method
+        created_data_source = await service.create_data_source_with_cached_extraction(
             user_id=current_user["user_id"],
-            data_source_name=request.data_source_name,
-            data_source_type=request.data_source_type,
-            data_source_url=request.data_source_url,
-            final_schema=request.final_schema,
-            temp_file_identifier=request.temp_file_identifier
+            temp_identifier=temp_identifier,
+            updated_llm_description=request.updated_llm_description,
         )
 
         return DataSourceCreateResponse(
@@ -312,10 +288,106 @@ async def create_data_source_with_schema(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error creating data source with schema: {e}")
+        logger.error(f"Error creating data source with temp_identifier {temp_identifier}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create data source"
         )
 
+
+@router.get("/pending", response_model=PendingExtractionListResponse)
+async def list_pending_extractions(
+    temp_service: TempDataSourceService = Depends(get_temp_data_source_service),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get list of pending schema extractions that haven't been created yet.
+    These are temporary extractions stored in Redis waiting for user approval.
+    """
+    try:
+        # Clean up expired extractions first
+        await temp_service.cleanup_expired_extractions(current_user["user_id"])
+        
+        # Get current pending extractions
+        pending_extractions = await temp_service.get_user_extractions(current_user["user_id"])
+        
+        return PendingExtractionListResponse(
+            message=f"Found {len(pending_extractions)} pending extractions",
+            pending_extractions=pending_extractions,
+            total_count=len(pending_extractions)
+        )
+
+    except Exception as e:
+        logger.error(f"Error listing pending extractions for user {current_user['user_id']}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve pending extractions"
+        )
+
+
+@router.get("/pending/{temp_identifier}", response_model=PendingExtractionResponse)
+async def get_pending_extraction(
+    temp_identifier: str = Path(..., description="Temporary identifier from schema extraction"),
+    temp_service: TempDataSourceService = Depends(get_temp_data_source_service),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get detailed information about a specific pending extraction.
+    Useful for reviewing the extracted schema before creating the data source.
+    """
+    try:
+        extraction_data = await temp_service.get_extraction(temp_identifier, current_user["user_id"])
+        
+        if not extraction_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Pending extraction not found or expired"
+            )
+
+        return PendingExtractionResponse(
+            message="Pending extraction retrieved successfully",
+            temp_identifier=temp_identifier,
+            extraction_result=extraction_data["extraction_result"],
+            created_at=extraction_data["created_at"],
+            expires_at=extraction_data["expires_at"],
+            has_file=extraction_data.get("has_file", False)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting pending extraction {temp_identifier}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve pending extraction"
+        )
+
+
+@router.delete("/pending/{temp_identifier}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_pending_extraction(
+    temp_identifier: str = Path(..., description="Temporary identifier from schema extraction"),
+    temp_service: TempDataSourceService = Depends(get_temp_data_source_service),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete a pending extraction if the user decides not to create the data source.
+    This cleans up temporary data from Redis.
+    """
+    try:
+        success = await temp_service.delete_extraction(temp_identifier, current_user["user_id"])
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Pending extraction not found or already expired"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting pending extraction {temp_identifier}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete pending extraction"
+        )
 

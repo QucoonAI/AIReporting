@@ -181,6 +181,7 @@ async def get_user_chat_sessions_paginated(
         )
 
 
+# Message Route
 @router.get(
     "/sessions/{session_id}",
     response_model=ChatSessionDetailResponse,
@@ -309,6 +310,7 @@ async def delete_chat_session(
         )
 
 
+# Message Route
 @router.post(
     "/sessions/{session_id}/messages",
     response_model=ChatMessageResponse,

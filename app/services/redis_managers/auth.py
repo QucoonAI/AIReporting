@@ -20,7 +20,7 @@ class AuthService:
         self.redis_client = redis_client
         self.key_manager = RedisKeyManager(app_name)
         self.algorithm = "HS256"
-        self.access_token_expire = timedelta(minutes=15)
+        self.access_token_expire = timedelta(minutes=60)
         self.refresh_token_expire = timedelta(days=1)
         self.secret_key = settings.SECRET_KEY
     
