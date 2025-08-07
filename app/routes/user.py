@@ -9,7 +9,6 @@ from app.schemas.user import (
     ChangePasswordRequest, ChangePasswordConfirmRequest, PasswordResetRequest,
     PasswordResetConfirmRequest, VerificationResponse, PasswordChangeResponse,
     PasswordResetResponse, UserDeleteResponse, UserResponse,
-    UserListResponse, UserSearchResponse, PaginationMetadata,
 )
 from app.core.dependencies import get_current_user, get_user_service, get_user_repo
 from app.core.utils import logger
@@ -19,7 +18,7 @@ router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
 
 @router.post(
-    "/create",
+    "/sign-up",
     response_model=UserCreateResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a new user",
@@ -60,7 +59,7 @@ async def create_user(
 
 
 @router.post(
-    "/verify",
+    "/verify-email",
     response_model=VerificationResponse,
     summary="Request email verification",
     description="Send verification email to user's email address."
@@ -91,7 +90,7 @@ async def verify_user(
 
 
 @router.post(
-    "/verify-confirm",
+    "/verify-email-confirm",
     response_model=VerificationResponse,
     summary="Confirm email verification",
     description="Confirm email verification using the OTP sent via email."
@@ -122,7 +121,7 @@ async def verify_user_confirm(
 
 
 @router.put(
-    "/update",
+    "/update-profile",
     response_model=UserUpdateResponse,
     summary="Update user information",
     description="Update user's basic information and profile. Requires authentication."
@@ -160,7 +159,7 @@ async def update_user(
 
 
 @router.delete(
-    "/delete",
+    "/delete-user",
     response_model=UserDeleteResponse,
     summary="Delete user account",
     description="Deactivate user account. Requires authentication."

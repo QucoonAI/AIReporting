@@ -1,4 +1,3 @@
-from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Path
 from app.services.data_source import DataSourceService
 from app.services.data_source_update import DataSourceUpdateService

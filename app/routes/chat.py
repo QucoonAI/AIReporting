@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Query, HTTPException, status, Path
 from typing import Optional, Dict, Any
 from app.services.chat import ChatService
+from app.services.message import MessageService
 from app.schemas.chat import (
     ChatSessionCreateRequest, ChatSessionCreateResponse, ChatSessionUpdateRequest,
     ChatSessionUpdateResponse, ChatSessionDeleteResponse, ChatSessionListResponse,
@@ -9,7 +10,7 @@ from app.schemas.chat import (
     ChatSessionPaginatedListResponse, PaginationMetadata,
     MessageResponse, MessageRole
 )
-from app.core.dependencies import get_current_user, get_chat_service
+from app.core.dependencies import get_current_user, get_chat_service, get_message_service
 from app.core.utils import logger
 
 
@@ -181,7 +182,6 @@ async def get_user_chat_sessions_paginated(
         )
 
 
-# Message Route
 @router.get(
     "/sessions/{session_id}",
     response_model=ChatSessionDetailResponse,
@@ -312,7 +312,7 @@ async def delete_chat_session(
 
 # Message Route
 @router.post(
-    "/sessions/{session_id}/messages",
+    "/sessions/{session_id}/send-message",
     response_model=ChatMessageResponse,
     summary="Send a message to the chat",
     description="Send a message to the AI and get a response."
@@ -321,7 +321,7 @@ async def send_message(
     session_id: str = Path(..., description="ID of the chat session"),
     message_data: ChatMessageRequest = ...,
     current_user: Dict[str, Any] = Depends(get_current_user),
-    chat_service: ChatService = Depends(get_chat_service)
+    message_service: MessageService = Depends(get_message_service)
 ) -> ChatMessageResponse:
     """
     Send a message to the AI chat.
@@ -333,7 +333,7 @@ async def send_message(
     Returns both the user message and AI response.
     """
     try:
-        assistant_message, limit_message = await chat_service.send_message(
+        assistant_message, limit_message = await message_service.send_message(
             user_id=current_user["user_id"],
             session_id=session_id,
             message_data=message_data

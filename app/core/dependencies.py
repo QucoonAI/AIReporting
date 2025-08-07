@@ -1,5 +1,4 @@
 from typing import Dict, Any
-import boto3
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.config.database import SessionDep
@@ -12,6 +11,7 @@ from app.services.temp_data_source import TempDataSourceService
 from app.services.data_source import DataSourceService
 from app.services.data_source_update import DataSourceUpdateService
 from app.services.chat import ChatService
+from app.services.message import MessageService
 from app.services.llm_services.llm import MockLLMService
 from app.repositories.user import UserRepository
 from app.repositories.data_source import DataSourceRepository
@@ -89,6 +89,15 @@ def get_chat_service(
 ) -> ChatService:
     """Dependency to get ChatService instance"""
     return ChatService(chat_repo, message_repo, data_source_repo, llm_service, redis_factory)
+
+def get_message_service(
+    message_repo: MessageRepository = Depends(get_message_repo),
+    chat_repo: ChatRepository = Depends(get_chat_repo),
+    llm_service: MockLLMService = Depends(get_llm_service),
+    redis_factory: RedisServiceFactory = Depends(get_redis_factory_service),
+) -> MessageService:
+    """Dependency to get MessageService instance"""
+    return MessageService(message_repo, chat_repo, llm_service, redis_factory)
 
 
 

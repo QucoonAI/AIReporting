@@ -35,51 +35,6 @@ class DataSourceService:
         self.DATABASE_TYPES = {'postgres', 'mysql'}
         self.temp_service = temp_service
 
-
-    def _get_llm_prompt_from_schema(self, schema_dict: Dict[str, Any]) -> Any:
-        """
-        Convert schema dictionary to LLM-friendly prompt.
-        """
-        try:
-            refactored_schema = llm.schema_refactor(schema_dict)
-            return refactored_schema
-        except Exception as e:
-            logger.error(f"Failed to generate LLM prompt from schema: {e}")
-            return "Schema information unavailable"
-
-    async def _validate_user_limits(self, user_id: int) -> None:
-        """
-        Validate user hasn't exceeded data source limits.
-        Raises:
-            DataSourceLimitExceededError: If limit exceeded
-        """
-        existing_data_sources = await self.data_source_repo.get_user_data_sources(user_id=user_id)
-        if len(existing_data_sources) >= self.MAX_DATA_SOURCES_PER_USER:
-            raise DataSourceLimitExceededError(self.MAX_DATA_SOURCES_PER_USER)
-
-    async def _validate_unique_name(self, user_id: int, name: str, exclude_id: Optional[int] = None) -> None:
-        """
-        Validate data source name is unique for user.
-        
-        Args:
-            user_id: ID of the user
-            name: Name to validate
-            exclude_id: Optional data source ID to exclude from check (for updates)
-            
-        Raises:
-            HTTPException: If name already exists
-        """
-        existing_data_source = await self.data_source_repo.get_data_source_by_name(
-            user_id=user_id,
-            name=name
-        )
-        
-        if existing_data_source and (exclude_id is None or existing_data_source.data_source_id != exclude_id):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Data source with name '{name}' already exists"
-            )
-
     async def update_data_source(
         self, 
         data_source_id: int, 
@@ -269,6 +224,9 @@ class DataSourceService:
                         detail=f"File is required for {data_source_type} data source"
                     )
                 
+                # Check file size from headers BEFORE reading
+                await self._validate_file_size(file)
+                
                 # Validate file without uploading to S3
                 file_content = await file.read()
                 validate_file(file, file_content)
@@ -427,4 +385,72 @@ class DataSourceService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to create data source"
             )
+
+    def _get_llm_prompt_from_schema(self, schema_dict: Dict[str, Any]) -> Any:
+        """
+        Convert schema dictionary to LLM-friendly prompt.
+        """
+        try:
+            refactored_schema = llm.schema_refactor(schema_dict)
+            return refactored_schema
+        except Exception as e:
+            logger.error(f"Failed to generate LLM prompt from schema: {e}")
+            return "Schema information unavailable"
+
+    async def _validate_user_limits(self, user_id: int) -> None:
+        """
+        Validate user hasn't exceeded data source limits.
+        Raises:
+            DataSourceLimitExceededError: If limit exceeded
+        """
+        existing_data_sources = await self.data_source_repo.get_user_data_sources(user_id=user_id)
+        if len(existing_data_sources) >= self.MAX_DATA_SOURCES_PER_USER:
+            raise DataSourceLimitExceededError(self.MAX_DATA_SOURCES_PER_USER)
+
+    async def _validate_unique_name(self, user_id: int, name: str, exclude_id: Optional[int] = None) -> None:
+        """
+        Validate data source name is unique for user.
+        
+        Args:
+            user_id: ID of the user
+            name: Name to validate
+            exclude_id: Optional data source ID to exclude from check (for updates)
+            
+        Raises:
+            HTTPException: If name already exists
+        """
+        existing_data_source = await self.data_source_repo.get_data_source_by_name(
+            user_id=user_id,
+            name=name
+        )
+        
+        if existing_data_source and (exclude_id is None or existing_data_source.data_source_id != exclude_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Data source with name '{name}' already exists"
+            )
+
+    async def _validate_file_size(self, file: UploadFile, max_size: int = 100 * 1024 * 1024):  # 100MB default
+        """Validate file size without reading content into memory"""
+
+        if hasattr(file, 'size') and file.size is not None:
+            if file.size > max_size:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File size ({file.size} bytes) exceeds maximum allowed size ({max_size} bytes)"
+                )
+            return
+        
+        # Method 2: Check headers if size attribute not available
+        if hasattr(file, 'headers'):
+            content_length = file.headers.get('content-length')
+            if content_length:
+                size = int(content_length)
+                if size > max_size:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"File size ({size} bytes) exceeds maximum allowed size ({max_size} bytes)"
+                    )
+            return
+
 
