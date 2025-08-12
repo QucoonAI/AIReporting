@@ -7,10 +7,11 @@ import uuid
 from fastapi import UploadFile, HTTPException, status
 from app.models.data_source import DataSource
 from app.schemas.data_source import DataSourceUpdateRequest
-from app.core.utils import logger, extract_s3_key_from_url, upload_file_to_s3, validate_file, download_file_from_s3, delete_file_from_s3
+from app.core.utils import logger
+from app.core.utils.s3_functions import extract_s3_key_from_url, upload_file_to_s3, validate_file, download_file_from_s3, delete_file_from_s3
 from .data_source import DataSourceService
-from .extractor import ExtactorService
-from .temp_data_source import TempDataSourceService
+from app.core.utils.extractor import ExtactorService
+from .redis_managers.data_source import TempDataSourceService
 
 
 extractor = ExtactorService()

@@ -7,7 +7,8 @@ import redis.asyncio as redis
 from . import RedisKeyManager
 from app.core.utils import logger
 
-# Solution 1: Custom JSON Encoder (Recommended)
+
+# Custom JSON Encoder (Recommended)
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Decimal):
@@ -250,5 +251,4 @@ class TransactionalCacheService(ChatCacheService):
             await self.redis_client.delete(session_key)
         
         await self.redis_client.delete(backup_key)
-
 

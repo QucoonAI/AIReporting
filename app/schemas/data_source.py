@@ -318,7 +318,7 @@ class DataSourceSchemaExtractionResponse(BaseModel):
 class DataSourceCreateWithSchemaRequest(BaseModel):
     """Request model for creating data source with approved schema"""
 
-    updated_llm_description: str = Field(
+    llm_description: str = Field(
         ..., description="User's final/edited LLM description"
     )
 

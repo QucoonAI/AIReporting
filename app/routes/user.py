@@ -1,10 +1,9 @@
-from datetime import datetime
-from fastapi import APIRouter, Depends, Query, HTTPException, status, BackgroundTasks
-from typing import Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, UploadFile, File, Form
+from typing import Dict, Any
 from app.services.user import UserService
 from app.repositories.user import UserRepository
 from app.schemas.user import (
-    UserCreateRequest, UserCreateResponse, UserUpdateRequest, UserUpdateResponse,
+    UserCreateRequest, UserCreateResponse, UserProfileBase, UserUpdateRequest, UserUpdateResponse,
     VerifyUserRequest, VerifyUserConfirmRequest,
     ChangePasswordRequest, ChangePasswordConfirmRequest, PasswordResetRequest,
     PasswordResetConfirmRequest, VerificationResponse, PasswordChangeResponse,
@@ -21,12 +20,18 @@ router = APIRouter(prefix="/api/v1/users", tags=["users"])
     "/sign-up",
     response_model=UserCreateResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Create a new user",
+    summary="User signs up",
     description="Create a new user account with optional profile information. Sends verification email."
 )
 async def create_user(
-    user_data: UserCreateRequest,
     background_tasks: BackgroundTasks,
+    user_email: str = Form(...),
+    user_first_name: str = Form(...),
+    user_last_name: str = Form(...),
+    user_password: str = Form(...),
+    user_profile_bio: str | None = Form(None),
+    user_phone_number: str | None = Form(None),
+    profile_avatar: UploadFile | None = File(None),
     user_service: UserService = Depends(get_user_service),
     user_repo: UserRepository = Depends(get_user_repo)
 ) -> UserCreateResponse:
@@ -42,7 +47,22 @@ async def create_user(
     Returns the created user information and sends a verification email.
     """
     try:
-        created_user = await user_service.create_user(user_data, background_tasks)
+        user_profile = None
+        if user_profile_bio or user_phone_number:
+            user_profile = UserProfileBase(
+                user_profile_bio=user_profile_bio,
+                user_phone_number=user_phone_number
+            )
+
+        user_data = UserCreateRequest(
+            user_email=user_email,
+            user_first_name=user_first_name,
+            user_last_name=user_last_name,
+            user_password=user_password,
+            user_profile=user_profile
+        )
+
+        created_user = await user_service.create_user(user_data, profile_avatar, background_tasks)
         user = await user_repo.get_user_by_id(created_user.user_id, include_profile=True)
         return UserCreateResponse(
             message="User created successfully. Please check your email for verification.",

@@ -4,7 +4,7 @@ from fastapi import HTTPException, status
 from app.repositories.message import MessageRepository
 from app.repositories.chat import ChatRepository
 from app.services.ai_service import AIQuery
-from app.services.llm_services.llm import MockLLMService
+from app.services.mock_llm import MockLLMService
 from app.schemas.chat import ChatMessageRequest, MessageRole
 from .redis_managers.factory import RedisServiceFactory
 from app.core.utils import logger

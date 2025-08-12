@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Path
 from app.services.data_source import DataSourceService
 from app.services.data_source_update import DataSourceUpdateService
-from app.services.temp_data_source import TempDataSourceService
+from app.services.redis_managers.data_source import TempDataSourceService
 from app.schemas.data_source_update import (
     ConnectionChangeUpdateRequest,
     MetadataOnlyUpdateRequest,

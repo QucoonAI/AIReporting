@@ -12,7 +12,6 @@ class UserBase(BaseModel):
 
 class UserProfileBase(BaseModel):
     user_profile_bio: Optional[str] = None
-    user_profile_avatar: Optional[str] = None
     user_phone_number: Optional[str] = None
 
 
@@ -96,6 +95,7 @@ class VerifyUserConfirmRequest(BaseModel):
 # Response schemas
 class UserProfileResponse(UserProfileBase):
     user_profile_id: int
+    user_profile_avatar: Optional[str] = None
     user_phone_verified: bool
     user_profile_created_at: datetime
     user_profile_updated_at: datetime

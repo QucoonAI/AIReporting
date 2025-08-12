@@ -1,7 +1,7 @@
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Path
 from app.services.data_source import DataSourceService
-from app.services.temp_data_source import TempDataSourceService
+from app.services.redis_managers.data_source import TempDataSourceService
 from app.schemas.data_source import (
     DataSourceUpdateRequest,
     DataSourceCreateResponse,
@@ -19,7 +19,6 @@ from app.schemas.enum import DataSourceType
 from app.models.user import User
 from app.core.dependencies import get_current_user, get_data_source_service, get_temp_data_source_service
 from app.core.utils import logger
-from .data_source_update import router as updates_router
 
 
 router = APIRouter(prefix="/api/v1/data-sources", tags=["Data Sources"])
@@ -31,7 +30,6 @@ async def upload_and_extract_schema(
     data_source_url: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     service: DataSourceService = Depends(get_data_source_service),
-    temp_service: TempDataSourceService = Depends(get_temp_data_source_service),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -75,30 +73,10 @@ async def upload_and_extract_schema(
             data_source_url=data_source_url,
             file=file
         )
-        
-        # Get file content for caching if it's a file-based source
-        file_content = None
-        if file and data_source_type in file_based_types:
-            await file.seek(0)  # Reset file pointer
-            file_content = await file.read()
-        
-        # Store in temporary cache
-        temp_identifier = await temp_service.store_extraction(
-            user_id=current_user["user_id"],
-            data_source_name=data_source_name,
-            extraction_result=extraction_result,
-            file_content=file_content
-        )
-        
-        # Add temp_identifier to the response
-        response_data = {
-            **extraction_result,
-            "temp_identifier": temp_identifier
-        }
 
         return DataSourceSchemaExtractionResponse(
             message="Schema extracted successfully. Please review and modify the description before creating the data source.",
-            **response_data
+            **extraction_result
         )
 
     except HTTPException:
@@ -128,7 +106,7 @@ async def create_data_source_with_schema(
         created_data_source = await service.create_data_source_with_cached_extraction(
             user_id=current_user["user_id"],
             temp_identifier=temp_identifier,
-            updated_llm_description=request.updated_llm_description,
+            llm_description=request.llm_description,
         )
 
         return DataSourceCreateResponse(
@@ -209,7 +187,7 @@ async def get_data_source(
             detail="Failed to retrieve data source"
         )
 
-@router.get("/", response_model=DataSourcePaginatedListResponse)
+@router.get("", response_model=DataSourcePaginatedListResponse)
 async def list_user_data_sources(
     page: int = 1,
     per_page: int = 10,

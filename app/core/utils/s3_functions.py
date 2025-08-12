@@ -1,18 +1,13 @@
-import logging
 import uuid
 import boto3
-import pandas as pd
+import mimetypes
 from typing import Optional
-from pymongo import MongoClient
-from pymongo.errors import PyMongoError
-from sqlalchemy import create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
 from fastapi import HTTPException, status, UploadFile
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
 from app.config.settings import get_settings
+from app.core.utils import logger
 
 
-settings = get_settings()
 
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
@@ -22,63 +17,16 @@ ALLOWED_EXTENSIONS = {
     'pdf': ['application/pdf']
 }
 
-
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
-    level=logging.INFO
+settings = get_settings()
+# s3_client = boto3.client('s3')
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=settings.ACCESS_KEY_ID,
+    aws_secret_access_key=settings.SECRET_ACCESS_KEY,
+    region_name=settings.REGION
 )
-logger = logging.getLogger(__name__)
-
-s3_client = boto3.client('s3')
 s3_bucket = settings.S3_BUCKET_NAME
-dynamodb_client = boto3.client('dynamodb', region_name=settings.REGION)
-bedrock = boto3.client(service_name="bedrock-runtime", region_name="us-east-1")
-
-
-def read_from_sql_db(query: str, connection_string: str) -> pd.DataFrame:
-    """
-    Connects to a SQL database (e.g., MySQL, PostgreSQL) and executes a SELECT query.
-    Returns the results as a pandas DataFrame.
-    Raises a ValueError if the query is not a SELECT statement.
-    """
-    if not query.strip().upper().startswith('SELECT'):
-        raise ValueError("This function is for read-only (SELECT) operations.")
-    try:
-        engine = create_engine(connection_string)
-        with engine.connect() as connection:
-            logger.info("Executing SELECT query.")
-            # Use pd.read_sql for efficient reading into a DataFrame
-            df = pd.read_sql(text(query), connection)
-            return df
-    except SQLAlchemyError as e:
-        logger.error(f"SQL Database read error: {e}")
-        # Re-raise the exception for the calling code to handle
-        raise
-
-def read_from_mongo_db(db_name: str, collection_name: str, filter_query: dict, connection_string: str) -> pd.DataFrame:
-    """
-    Queries a MongoDB collection and returns the results as a pandas DataFrame.
-    Args:
-        db_name: The name of the database.
-        collection_name: The name of the collection.
-        filter_query: The MongoDB query filter (e.g., {'status': 'active'}).
-                      Use an empty dict {} to find all documents.
-        connection_string: The MongoDB connection string.
-    """
-    try:
-        # Using a 'with' statement ensures the connection is managed properly
-        with MongoClient(connection_string) as client:
-            db = client[db_name]
-            collection = db[collection_name]
-            logger.info(f"Querying MongoDB collection '{collection_name}' with filter: {filter_query}")
-            # .find() performs the read operation
-            cursor = collection.find(filter_query)
-            # Convert the results to a DataFrame
-            return pd.DataFrame(list(cursor))
-    except PyMongoError as e:
-        logger.error(f"MongoDB read error: {e}")
-        # Re-raise the exception
-        raise
+s3_profile_avatar_bucket = settings.S3_PROFILE_AVATAR_BUCKET
 
 def extract_s3_key_from_url(s3_url: str) -> str:
     """Extract S3 key from S3 URL."""
@@ -212,5 +160,123 @@ async def delete_file_from_s3(s3_key: str):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete file from storage"
+        )
+
+async def upload_image_to_s3(
+    image_file: UploadFile, 
+    user_id: int,
+) -> str:
+    """
+    Upload a user's image to S3 bucket and return the public URL.
+    
+    Args:
+        image_file: FastAPI UploadFile object
+        user_id: ID of the user who owns this image
+    
+    Returns:
+        str: Public S3 URL of the uploaded image
+        
+    Raises:
+        HTTPException: If the file type is not supported or upload fails
+    """
+    
+    # Supported image MIME types
+    SUPPORTED_IMAGE_TYPES = {'image/jpeg', 'image/jpg', 'image/png'}
+    
+    try:
+        # Validate file size (10MB limit for images)
+        MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB
+        if image_file.size > MAX_IMAGE_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Image size exceeds maximum limit of {MAX_IMAGE_SIZE // (1024*1024)}MB"
+            )
+
+        # Determine content type and validate
+        content_type = image_file.content_type
+        if not content_type:
+            content_type, _ = mimetypes.guess_type(image_file.filename or '')
+        if not content_type:
+            content_type = 'image/jpeg'  # Default fallback
+            
+        # Validate image type
+        if content_type not in SUPPORTED_IMAGE_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported image type: {content_type}. Supported types: {', '.join(SUPPORTED_IMAGE_TYPES)}"
+            )
+        
+        # Generate filename with extension
+        if image_file.filename:
+            extension = image_file.filename.split('.')[-1].lower()
+        else:
+            # Guess extension from content type
+            extension = mimetypes.guess_extension(content_type)
+            if extension:
+                extension = extension[1:]  # Remove the dot
+            else:
+                extension = 'jpg'  # Default fallback
+        
+        # Create unique filename with user ID and timestamp
+        timestamp = uuid.uuid4().hex[:8]
+        filename = f"user_{user_id}_{timestamp}.{extension}"
+        
+        # Create S3 key with folder structure
+        folder = "profile_avatars"
+        s3_key = f"{folder}/user_{user_id}/{filename}"
+        
+        # Upload to S3
+        s3_client.upload_fileobj(
+            image_file.file,
+            s3_profile_avatar_bucket,
+            s3_key,
+            ExtraArgs={
+                'ContentType': content_type,
+                'ServerSideEncryption': 'AES256',
+                'CacheControl': 'max-age=31536000',  # Cache for 1 year
+                'Metadata': {
+                    'user_id': str(user_id),
+                }
+            }
+        )
+        
+        # Construct and return public URL
+        public_url = f"https://{s3_profile_avatar_bucket}.s3.{settings.REGION}.amazonaws.com/{s3_key}"
+        logger.info(f"Profile image uploaded successfully for user {user_id}: {s3_key}")
+        return public_url
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except NoCredentialsError:
+        logger.error("AWS credentials not found")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Storage service configuration error"
+        )
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+        logger.error(f"S3 upload error for user {user_id}: {error_code} - {e}")
+        
+        if error_code == 'NoSuchBucket':
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Storage bucket not found"
+            )
+        elif error_code == 'AccessDenied':
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Storage access denied"
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to upload image to storage"
+            )
+    except Exception as e:
+        logger.error(f"Unexpected error uploading image for user {user_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Image upload failed"
         )
 

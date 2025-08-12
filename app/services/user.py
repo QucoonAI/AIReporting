@@ -1,6 +1,6 @@
 from typing import Optional, Dict, Any
 from sqlmodel import select
-from fastapi import HTTPException, status, BackgroundTasks, Request
+from fastapi import HTTPException, status, BackgroundTasks, Request, UploadFile
 from passlib.context import CryptContext
 from app.models import User, UserProfile
 from app.core.exceptions import (
@@ -9,6 +9,7 @@ from app.core.exceptions import (
     RateLimitExceededError
 )
 from app.core.utils import logger
+from app.core.utils.s3_functions import upload_image_to_s3
 from app.config.database import SessionDep
 from app.services.background_services.email_service import (
     EmailService, send_verification_email_task, send_password_reset_email_task,
@@ -90,7 +91,7 @@ class UserService:
                 otp
             )
 
-    async def create_user(self, user_data: UserCreateRequest, background_tasks: BackgroundTasks) -> User:
+    async def create_user(self, user_data: UserCreateRequest, user_profile_avatar: UploadFile | None, background_tasks: BackgroundTasks) -> User:
         """Create a new user."""
         try:
             # Check if user already exists
@@ -121,10 +122,17 @@ class UserService:
             
             # Create user profile if provided
             if user_data.user_profile:
+                user_profile_avatar_url = None
+                if user_profile_avatar:
+                    user_profile_avatar_url = await upload_image_to_s3(
+                        image_file=user_profile_avatar,
+                        user_id=user.user_id
+                    )
+
                 profile = UserProfile(
                     user_profile_user_id=user.user_id,
                     user_profile_bio=user_data.user_profile.user_profile_bio,
-                    user_profile_avatar=user_data.user_profile.user_profile_avatar,
+                    user_profile_avatar=user_profile_avatar_url,
                     user_phone_number=user_data.user_profile.user_phone_number
                 )
                 self.session.add(profile)

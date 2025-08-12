@@ -7,12 +7,12 @@ from app.config.settings import get_settings
 from app.services.redis_managers.factory import RedisServiceFactory
 from app.services.background_services.email_service import EmailService
 from app.services.user import UserService
-from app.services.temp_data_source import TempDataSourceService
+from app.services.redis_managers.data_source import TempDataSourceService
 from app.services.data_source import DataSourceService
 from app.services.data_source_update import DataSourceUpdateService
 from app.services.chat import ChatService
 from app.services.message import MessageService
-from app.services.llm_services.llm import MockLLMService
+from app.services.mock_llm import MockLLMService
 from app.repositories.user import UserRepository
 from app.repositories.data_source import DataSourceRepository
 from app.repositories.chat import ChatRepository

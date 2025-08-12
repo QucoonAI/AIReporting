@@ -3,7 +3,7 @@ from fastapi import HTTPException, status
 from app.repositories.chat import ChatRepository
 from app.repositories.message import MessageRepository
 from app.repositories.data_source import DataSourceRepository
-from app.services.llm_services.llm import MockLLMService
+from app.services.mock_llm import MockLLMService
 from app.services.ai_service import AIQuery
 from .redis_managers.factory import RedisServiceFactory
 from app.schemas.chat import (

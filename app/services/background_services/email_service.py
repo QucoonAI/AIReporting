@@ -9,7 +9,7 @@ settings = get_settings()
 class EmailService:
     def __init__(self, settings: Settings = None):
         self.sg = sendgrid.SendGridAPIClient(api_key=settings.SENDGRID_AUTH_KEY)
-        self.from_email = Email("boluwatife.israel@qucoon.com")
+        self.from_email = Email("info.pedigraph@qucoon.com")
     
     def _send_email(self, to_email: str, subject: str, html_content: str, text_content: str = None):
         if text_content:

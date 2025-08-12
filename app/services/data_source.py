@@ -8,18 +8,17 @@ from app.models.data_source import DataSource
 from app.repositories.data_source import DataSourceRepository
 from app.schemas.data_source import DataSourceUpdateRequest
 from app.schemas.enum import DataSourceType
-from app.config.settings import get_settings
-from app.core.utils import logger, upload_file_to_s3, validate_file
+from app.core.utils import logger
+from app.core.utils.s3_functions import upload_file_to_s3, validate_file
+from app.core.utils.extractor import ExtactorService
 from app.core.exceptions import (
     DataSourceNotFoundError,
     DataSourceLimitExceededError
 )
-from .llm_services.ai_function import AIQuery
-from .extractor import ExtactorService
-from .temp_data_source import TempDataSourceService
+from .ai_service import AIQuery
+from .redis_managers.data_source import TempDataSourceService
 
 
-settings = get_settings()
 llm = AIQuery()
 extractor = ExtactorService()
 
@@ -34,6 +33,209 @@ class DataSourceService:
         self.FILE_BASED_TYPES = {'csv', 'xlsx', 'pdf'}
         self.DATABASE_TYPES = {'postgres', 'mysql'}
         self.temp_service = temp_service
+
+
+    async def upload_and_extract_schema(
+        self, 
+        user_id: int, 
+        data_source_name: str,
+        data_source_type: str,
+        data_source_url: Optional[str] = None,
+        file: Optional[UploadFile] = None
+    ) -> Dict[str, Any]:
+        """
+        Enhanced schema extraction - no longer handles caching directly.
+        Returns extraction result that will be cached by the route handler.
+        """
+        try:
+            # Validate user limits and name uniqueness
+            await self._validate_user_limits(user_id)
+            await self._validate_unique_name(user_id, data_source_name)
+            
+            json_schema = None
+            final_url = data_source_url
+            file_content = None
+            
+            # Handle file-based data sources
+            if data_source_type in self.FILE_BASED_TYPES:
+                if not file:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"File is required for {data_source_type} data source"
+                    )
+                
+                validate_file(file, file_content)
+                
+                raise HTTPException(
+                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                    detail=f"{data_source_type.title()} integration is not implemented yet"
+                )
+                # # Extract schema from file content
+                # file_content = await file.read()
+                # json_schema = await extractor._extract_schema_from_file(
+                #     data_source_type, 
+                #     file_content=file_content
+                # )
+                
+                # # Generate placeholder URL for display
+                # file_extension = get_file_extension(file.filename)
+                # final_url = f"pending_upload://{data_source_name}_{uuid.uuid4().hex}.{file_extension}"
+                
+            # Handle database connections
+            elif data_source_type in self.DATABASE_TYPES:
+                json_schema = await extractor._extract_schema_from_database(
+                    data_source_type, 
+                    data_source_url
+                )
+                final_url = data_source_url
+                
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                    detail=f"{data_source_type.title()} integration is not implemented yet"
+                )
+            
+            # Generate LLM description
+            llm_description = self._get_llm_prompt_from_schema(json_schema)
+            
+            # Prepare result data
+            result = {
+                "data_source_name": data_source_name,
+                "data_source_type": data_source_type,
+                "data_source_url": final_url,
+                "tables": json_schema, # for ui display
+                "llm_description": json.dumps(llm_description) if isinstance(llm_description, dict) else str(llm_description),
+                "raw_schema": json_schema # Keep raw schema for database creation
+            }
+            
+            # Add file metadata for file-based sources
+            if file:
+                result["file_metadata"] = {
+                    "filename": file.filename,
+                    "content_type": file.content_type,
+                }
+            
+            # Get file content for caching if it's a file-based source
+            file_content = None
+            if file and data_source_type in self.FILE_BASED_TYPES:
+                await file.seek(0)  # Reset file pointer
+                file_content = await file.read()
+            
+            # Store in temporary cache
+            temp_identifier = await self.temp_service.store_extraction(
+                user_id=user_id,
+                data_source_name=data_source_name,
+                extraction_result=result,
+                file_content=file_content
+            )
+
+            result["temp_identifier"] = temp_identifier
+            
+            return result
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error during schema extraction: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to extract schema from data source"
+            )
+
+    async def create_data_source_with_cached_extraction(
+        self,
+        user_id: int,
+        temp_identifier: str,
+        llm_description: str,
+    ) -> DataSource:
+        """
+        Create data source using cached extraction result.
+        Handles both file and database sources uniformly.
+        """
+        try:
+            # Retrieve cached extraction data
+            cached_data = await self.temp_service.get_extraction(temp_identifier, user_id)
+            
+            if not cached_data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Extraction data not found or expired. Please re-extract the schema."
+                )
+            
+            extraction_result = cached_data["extraction_result"]
+            
+            # Re-validate user limits and name uniqueness (in case time passed)
+            data_source_name = extraction_result["data_source_name"]
+            await self._validate_user_limits(user_id)
+            await self._validate_unique_name(user_id, data_source_name)
+            
+            # Prepare schema with updated LLM description
+            final_schema = extraction_result.get("raw_schema", {})
+            if "metadata" not in final_schema:
+                final_schema["metadata"] = {}
+            
+            final_schema["metadata"]["llm_description"] = llm_description
+            final_schema["metadata"]["user_approved"] = True
+            final_schema["metadata"]["approved_at"] = datetime.now().isoformat()
+            
+            # Determine actual URL and data source type
+            data_source_type_str = extraction_result["data_source_type"]
+            data_source_type = DataSourceType(data_source_type_str)
+            actual_url = extraction_result["data_source_url"]
+            
+            # Handle file upload to S3 for file-based sources
+            if data_source_type.value in self.FILE_BASED_TYPES:
+                if not cached_data.get("has_file"):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="File content not found in cached data"
+                    )
+                
+                # Retrieve and decode file content
+                file_content = base64.b64decode(cached_data["file_content"])
+                file_metadata = extraction_result.get("file_metadata", {})
+                
+                # Recreate UploadFile object
+                file_obj = UploadFile(
+                    filename=file_metadata.get("filename", "unknown"),
+                    file=io.BytesIO(file_content),
+                    content_type=file_metadata.get("content_type", "application/octet-stream")
+                )
+                
+                # Upload to S3
+                actual_url = await upload_file_to_s3(
+                    file=file_obj,
+                    user_id=user_id,
+                    data_source_name=data_source_name
+                )
+                
+                logger.info(f"File uploaded to S3 from cached extraction: {actual_url}")
+            
+            # Create the data source
+            data_source = DataSource(
+                data_source_user_id=user_id,
+                data_source_name=data_source_name,
+                data_source_type=data_source_type,
+                data_source_url=actual_url,
+                data_source_schema=final_schema["metadata"]["llm_description"], # For now, save only the updated_llm_desciption
+            )
+            
+            created_data_source = await self.data_source_repo.create_data_source(data_source)
+            
+            # Clean up cached data
+            await self.temp_service.delete_extraction(temp_identifier, user_id)
+            
+            logger.info(f"Data source created from cached extraction: {created_data_source.data_source_id}")
+            return created_data_source
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error creating data source from cache: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create data source"
+            )
 
     async def update_data_source(
         self, 
@@ -192,200 +394,6 @@ class DataSourceService:
                 detail="Failed to retrieve data sources"
             )
 
-    #-------------------------------------------------------------------------------------------------
-    #-------------------------------------------------------------------------------------------------
-
-    async def upload_and_extract_schema(
-        self, 
-        user_id: int, 
-        data_source_name: str,
-        data_source_type: str,
-        data_source_url: Optional[str] = None,
-        file: Optional[UploadFile] = None
-    ) -> Dict[str, Any]:
-        """
-        Enhanced schema extraction - no longer handles caching directly.
-        Returns extraction result that will be cached by the route handler.
-        """
-        try:
-            # Validate user limits and name uniqueness
-            await self._validate_user_limits(user_id)
-            await self._validate_unique_name(user_id, data_source_name)
-            
-            json_schema = None
-            final_url = data_source_url
-            file_content = None
-            
-            # Handle file-based data sources
-            if data_source_type in self.FILE_BASED_TYPES:
-                if not file:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"File is required for {data_source_type} data source"
-                    )
-                
-                # Check file size from headers BEFORE reading
-                await self._validate_file_size(file)
-                
-                # Validate file without uploading to S3
-                file_content = await file.read()
-                validate_file(file, file_content)
-                
-                raise HTTPException(
-                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                    detail=f"{data_source_type.title()} integration is not implemented yet"
-                )
-                # # Extract schema from file content
-                # json_schema = await extractor._extract_schema_from_file(
-                #     data_source_type, 
-                #     file_content=file_content
-                # )
-                
-                # # Generate placeholder URL for display
-                # file_extension = get_file_extension(file.filename)
-                # final_url = f"pending_upload://{data_source_name}_{uuid.uuid4().hex}.{file_extension}"
-                
-            # Handle database connections
-            elif data_source_type in self.DATABASE_TYPES:
-                json_schema = await extractor._extract_schema_from_database(
-                    data_source_type, 
-                    data_source_url
-                )
-                final_url = data_source_url
-                
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                    detail=f"{data_source_type.title()} integration is not implemented yet"
-                )
-            
-            # Generate LLM description
-            llm_description = self._get_llm_prompt_from_schema(json_schema)
-            
-            # Prepare result data
-            result = {
-                "data_source_name": data_source_name,
-                "data_source_type": data_source_type,
-                "data_source_url": final_url,
-                "tables": json_schema, # for ui display
-                "llm_description": json.dumps(llm_description) if isinstance(llm_description, dict) else str(llm_description),
-                "raw_schema": json_schema # Keep raw schema for database creation
-            }
-            
-            # Add file metadata for file-based sources
-            if file:
-                result["file_metadata"] = {
-                    "filename": file.filename,
-                    "content_type": file.content_type,
-                    "size": len(file_content)
-                }
-            
-            return result
-            
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error during schema extraction: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to extract schema from data source"
-            )
-
-    async def create_data_source_with_cached_extraction(
-        self,
-        user_id: int,
-        temp_identifier: str,
-        updated_llm_description: str,
-    ) -> DataSource:
-        """
-        Create data source using cached extraction result.
-        Handles both file and database sources uniformly.
-        """
-        try:
-            # Retrieve cached extraction data
-            cached_data = await self.temp_service.get_extraction(temp_identifier, user_id)
-            
-            if not cached_data:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Extraction data not found or expired. Please re-extract the schema."
-                )
-            
-            extraction_result = cached_data["extraction_result"]
-            
-            # Re-validate user limits and name uniqueness (in case time passed)
-            data_source_name = extraction_result["data_source_name"]
-            await self._validate_user_limits(user_id)
-            await self._validate_unique_name(user_id, data_source_name)
-            
-            # Prepare schema with updated LLM description
-            final_schema = extraction_result.get("raw_schema", {})
-            if "metadata" not in final_schema:
-                final_schema["metadata"] = {}
-            
-            final_schema["metadata"]["llm_description"] = updated_llm_description
-            final_schema["metadata"]["user_approved"] = True
-            final_schema["metadata"]["approved_at"] = datetime.now().isoformat()
-            
-            # Determine actual URL and data source type
-            data_source_type_str = extraction_result["data_source_type"]
-            data_source_type = DataSourceType(data_source_type_str)
-            actual_url = extraction_result["data_source_url"]
-            
-            # Handle file upload to S3 for file-based sources
-            if data_source_type.value in self.FILE_BASED_TYPES:
-                if not cached_data.get("has_file"):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="File content not found in cached data"
-                    )
-                
-                # Retrieve and decode file content
-                file_content = base64.b64decode(cached_data["file_content"])
-                file_metadata = extraction_result.get("file_metadata", {})
-                
-                # Recreate UploadFile object
-                file_obj = UploadFile(
-                    filename=file_metadata.get("filename", "unknown"),
-                    file=io.BytesIO(file_content),
-                    content_type=file_metadata.get("content_type", "application/octet-stream")
-                )
-                
-                # Upload to S3
-                actual_url = await upload_file_to_s3(
-                    file=file_obj,
-                    user_id=user_id,
-                    data_source_name=data_source_name
-                )
-                
-                logger.info(f"File uploaded to S3 from cached extraction: {actual_url}")
-            
-            # Create the data source
-            data_source = DataSource(
-                data_source_user_id=user_id,
-                data_source_name=data_source_name,
-                data_source_type=data_source_type,
-                data_source_url=actual_url,
-                data_source_schema=final_schema["metadata"]["llm_description"], # For now, save only the updated_llm_desciption
-            )
-            
-            created_data_source = await self.data_source_repo.create_data_source(data_source)
-            
-            # Clean up cached data
-            await self.temp_service.delete_extraction(temp_identifier, user_id)
-            
-            logger.info(f"Data source created from cached extraction: {created_data_source.data_source_id}")
-            return created_data_source
-            
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error creating data source from cache: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to create data source"
-            )
-
     def _get_llm_prompt_from_schema(self, schema_dict: Dict[str, Any]) -> Any:
         """
         Convert schema dictionary to LLM-friendly prompt.
@@ -429,28 +437,4 @@ class DataSourceService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Data source with name '{name}' already exists"
             )
-
-    async def _validate_file_size(self, file: UploadFile, max_size: int = 100 * 1024 * 1024):  # 100MB default
-        """Validate file size without reading content into memory"""
-
-        if hasattr(file, 'size') and file.size is not None:
-            if file.size > max_size:
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=f"File size ({file.size} bytes) exceeds maximum allowed size ({max_size} bytes)"
-                )
-            return
-        
-        # Method 2: Check headers if size attribute not available
-        if hasattr(file, 'headers'):
-            content_length = file.headers.get('content-length')
-            if content_length:
-                size = int(content_length)
-                if size > max_size:
-                    raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"File size ({size} bytes) exceeds maximum allowed size ({max_size} bytes)"
-                    )
-            return
-
 

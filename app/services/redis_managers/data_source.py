@@ -2,7 +2,7 @@ import uuid
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from app.core.utils import logger
-from .redis_managers.factory import RedisServiceFactory
+from .factory import RedisServiceFactory
 
 
 class TempDataSourceService:
@@ -345,5 +345,4 @@ class TempDataSourceService:
                 "timestamp": datetime.now().isoformat(),
                 "error": str(e)
             }
-
 

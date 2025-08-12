@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     DYNAMODB_CHAT_SESSIONS_TABLE: str
     DYNAMODB_MESSAGES_TABLE: str
     S3_BUCKET_NAME: str
+    S3_PROFILE_AVATAR_BUCKET: str
 
     # Chat settings
     DEFAULT_MAX_TOKENS: int

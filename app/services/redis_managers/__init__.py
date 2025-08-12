@@ -8,6 +8,8 @@ class RedisKeyManager:
     OTP_PREFIX = "otp"                           # OTP tokens
     OTP_ATTEMPTS_PREFIX = "otp_attempts"         # OTP rate limiting
     CHAT_SESSION_PREFIX = "chat_session"         # Chat session data
+    EXTRACTION_PREFIX = "data_source_extraction" # Data source extraction data 
+    USER_EXTRACTIONS_PREFIX = "user_extractions_list" # Data
     TEMP_DATA_PREFIX = "temp_data"               # Temporary data
     RATE_LIMIT_PREFIX = "rate_limit"             # Rate limiting counters
     LOCK_PREFIX = "lock"                         # Distributed locks
