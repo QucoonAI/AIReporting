@@ -1,0 +1,5 @@
+project_name       = ""
+environment        = "dev"
+aws_region         = ""
+lambda_timeout     = int
+lambda_memory_size = int
