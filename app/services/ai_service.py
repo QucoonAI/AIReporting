@@ -336,16 +336,15 @@ class AIQuery:
             if data_source == "MySQL" and query_type == "sql":
                 query = agent_call.get("query")
                 query_result = read_from_sql_db(query, data_source_url)
-                return query_result, query_type
+                return query_result, query_type, query
             elif data_source == "MongoDB" and query_type == "mongodb":
                 query = agent_call.get("query")
                 query_result = read_from_mongo_db(query, data_source_url)
-                return query_result, query_type
+                return query_result, query_type, query
             elif data_source == "PostgreSQL" and query_type == "postgresql":
                 query = agent_call.get("query")
                 query_result = read_from_sql_db(query, data_source_url)
-                print('ggg')
-                return query_result, query_type
+                return query_result, query_type, query
         elif agent_type == "generic_response":
             query_type = agent_call.get("queryType", "text")
             if query_type == "text":

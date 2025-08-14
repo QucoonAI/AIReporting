@@ -267,15 +267,18 @@ class MessageService:
             message = user_message # user message (str)
             memory = json.dumps(context_messages) # chat context (str)
 
+            ai_query = None
             initial_response = agent.initial_processor(message, memory)
             if initial_response[1]['requestType'] == "query_response":
                 json_extractor = agent.agentic_call(initial_response, data_source_info)
+                ai_query = json_extractor[-1]
                 final_response = agent.final_processor(initial_response, json_extractor)
             else:
                 final_response = agent.final_processor(initial_response, None)
 
             ai_response = {
                 "response_type": initial_response[1]['requestType'],
+                "response_query": ai_query,
                 "response": final_response
             }
 
