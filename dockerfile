@@ -43,3 +43,8 @@ COPY ./app ${LAMBDA_TASK_ROOT}/app
 
 # Set the AWS Lambda handler.
 CMD ["app.main.handler"]
+
+
+# docker buildx build --platform linux/amd64 --load -t pedigragh .
+# docker tag <image-id> 992382810653.dkr.ecr.us-east-1.amazonaws.com/pedigragh:latest
+# docker push 992382810653.dkr.ecr.us-east-1.amazonaws.com/pedigragh:latest

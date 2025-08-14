@@ -2,6 +2,8 @@ import pandas as pd
 import io
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse, urlunparse
+from sqlalchemy import text
 from fastapi import UploadFile, HTTPException, status
 from app.core.utils import logger
 from .db_classes.postgres.main import PostgresSchemaExtractor
@@ -621,4 +623,141 @@ class ExtactorService:
         except Exception as e:
             logger.error(f"Error extracting PDF schema: {e}")
             raise
+
+    async def execute_database_query(
+        self,
+        query: str,
+        connection_string: str,
+        data_source_type: str
+    ) -> pd.DataFrame:
+        """
+        Execute a read-only query against any supported database and return results as DataFrame.
+        
+        Args:
+            query: SQL query to execute (must be SELECT statement)
+            connection_string: Database connection string
+            data_source_type: Type of database ('postgres', 'mysql', 'mariadb', 'mssql', 'oracle')
+            
+        Returns:
+            pandas DataFrame with query results
+            
+        Raises:
+            HTTPException: If query is not SELECT or execution fails
+            ValueError: If data_source_type is not supported
+        """
+        # Validate that this is a read-only query
+        if not query.strip().upper().startswith('SELECT'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only SELECT queries are allowed for security reasons"
+            )
+        
+        # Validate data source type
+        if data_source_type not in self.DATABASE_TYPES:
+            raise ValueError(f"Unsupported database type: {data_source_type}. Supported types: {self.DATABASE_TYPES}")
+        
+        try:
+            if data_source_type == 'postgres':
+                # Normalize connection string for psycopg (not psycopg2)
+                normalized_conn = self._normalize_postgres_connection_string(connection_string)
+                async with PostgresSchemaExtractor(normalized_conn) as extractor:
+                    async with extractor._extractor.engine.connect() as conn:
+                        result = await conn.execute(text(query))
+                        
+                        # Convert result to DataFrame
+                        columns = list(result.keys())
+                        rows = result.fetchall()
+                        return pd.DataFrame(rows, columns=columns)
+            
+            elif data_source_type == 'mysql':
+                async with MySQLSchemaExtractor(connection_string) as extractor:
+                    async with extractor.engine.connect() as conn:
+                        result = await conn.execute(text(query))
+                        
+                        columns = list(result.keys())
+                        rows = result.fetchall()
+                        return pd.DataFrame(rows, columns=columns)
+            
+            elif data_source_type == 'mariadb':
+                async with MariaDBSchemaExtractor(connection_string) as extractor:
+                    async with extractor.engine.connect() as conn:
+                        result = await conn.execute(text(query))
+                        
+                        columns = list(result.keys())
+                        rows = result.fetchall()
+                        return pd.DataFrame(rows, columns=columns)
+            
+            elif data_source_type == 'mssql':
+                async with MSSQLSchemaExtractor(connection_string) as extractor:
+                    async with extractor.engine.connect() as conn:
+                        result = await conn.execute(text(query))
+                        
+                        columns = list(result.keys())
+                        rows = result.fetchall()
+                        return pd.DataFrame(rows, columns=columns)
+            
+            elif data_source_type == 'oracle':
+                async with OracleSchemaExtractor(connection_string) as extractor:
+                    async with extractor.engine.connect() as conn:
+                        result = await conn.execute(text(query))
+                        
+                        columns = list(result.keys())
+                        rows = result.fetchall()
+                        return pd.DataFrame(rows, columns=columns)
+            
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Database type {data_source_type} is not supported for query execution"
+                )
+                
+        except HTTPException:
+            # Re-raise HTTP exceptions as-is
+            raise
+        except Exception as e:
+            logger.error(f"Database query execution failed for {data_source_type}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to execute query on {data_source_type} database: {str(e)}"
+            )
+
+    def _normalize_postgres_connection_string(self, connection_string: str) -> str:
+        """
+        Normalize PostgreSQL connection string to use psycopg (not psycopg2) for async operations.
+        
+        Args:
+            connection_string: Original PostgreSQL connection string
+            
+        Returns:
+            Normalized connection string with asyncpg driver
+        """
+        
+        try:
+            parsed = urlparse(connection_string)
+            
+            # Handle different PostgreSQL scheme formats
+            if parsed.scheme in ['postgres', 'postgresql']:
+                # Use asyncpg for async operations
+                new_scheme = 'postgresql+asyncpg'
+            elif parsed.scheme.startswith('postgresql+psycopg2'):
+                # Replace psycopg2 with asyncpg
+                new_scheme = 'postgresql+asyncpg'
+            elif parsed.scheme.startswith('postgresql+psycopg'):
+                # Replace psycopg with asyncpg (psycopg is sync, we need async)
+                new_scheme = 'postgresql+asyncpg'
+            elif parsed.scheme.startswith('postgresql+asyncpg'):
+                # Already correct
+                return connection_string
+            else:
+                # Default to asyncpg
+                new_scheme = 'postgresql+asyncpg'
+            
+            # Rebuild the connection string
+            normalized_parsed = parsed._replace(scheme=new_scheme)
+            return urlunparse(normalized_parsed)
+            
+        except Exception as e:
+            logger.warning(f"Could not parse PostgreSQL connection string, using as-is: {e}")
+            return connection_string
+
 

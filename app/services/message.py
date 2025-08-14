@@ -270,7 +270,7 @@ class MessageService:
             ai_query = None
             initial_response = agent.initial_processor(message, memory)
             if initial_response[1]['requestType'] == "query_response":
-                json_extractor = agent.agentic_call(initial_response, data_source_info)
+                json_extractor = await agent.agentic_call(initial_response, data_source_info)
                 ai_query = json_extractor[-1]
                 final_response = agent.final_processor(initial_response, json_extractor)
             else:

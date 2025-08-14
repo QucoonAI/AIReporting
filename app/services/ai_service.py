@@ -1,8 +1,11 @@
 import yaml
 import anthropic
 from app.core.utils import bedrock, read_from_sql_db, read_from_mongo_db
+from app.core.utils.extractor import ExtactorService
 
 
+
+extractor = ExtactorService()
 modelId = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
 with open("app/config/prompts.yaml", "r") as file:
@@ -321,7 +324,7 @@ class AIQuery:
             exception = True
             return exception, str(e)
     
-    def agentic_call(self, message, db_creds):
+    async def agentic_call(self, message, db_creds):
         data_source_schema = db_creds["schema"]
         data_source_type = db_creds["type"]
         data_source_url = db_creds["url"]
@@ -335,7 +338,8 @@ class AIQuery:
             query_type = agent_call.get("queryType")
             if data_source == "MySQL" and query_type == "sql":
                 query = agent_call.get("query")
-                query_result = read_from_sql_db(query, data_source_url)
+                query_result = await extractor.execute_database_query(query=query, connection_string=data_source_url, data_source_type='mysql')
+                # query_result = read_from_sql_db(query, data_source_url)
                 return query_result, query_type, query
             elif data_source == "MongoDB" and query_type == "mongodb":
                 query = agent_call.get("query")
@@ -343,7 +347,8 @@ class AIQuery:
                 return query_result, query_type, query
             elif data_source == "PostgreSQL" and query_type == "postgresql":
                 query = agent_call.get("query")
-                query_result = read_from_sql_db(query, data_source_url)
+                query_result = await extractor.execute_database_query(query=query, connection_string=data_source_url, data_source_type='postgres')
+                # query_result = read_from_sql_db(query, data_source_url)
                 return query_result, query_type, query
         elif agent_type == "generic_response":
             query_type = agent_call.get("queryType", "text")
