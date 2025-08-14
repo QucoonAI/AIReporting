@@ -29,7 +29,9 @@ class ChatCacheService:
         try:
             session_key = self.key_manager.chat_session_key(session_id)
             session_data = await self.redis_client.get(session_key)
-            
+
+            logger.info(f"Fetching session data for {session_key} from cache")
+
             if session_data:
                 data = json.loads(session_data)
                 return (
@@ -42,7 +44,8 @@ class ChatCacheService:
             
         except Exception as e:
             logger.error(f"Error getting session data from cache: {e}")
-            return [], 0, {}
+            # return [], 0, {}
+            raise
     
     async def update_session_data(
         self, 

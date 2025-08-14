@@ -212,7 +212,7 @@ class DataSourceResponse(BaseModel):
     data_source_url: str = Field(..., description="URL of the data source")
     data_source_created_at: datetime
     data_source_updated_at: datetime
-    data_source_schema: Union[str, Dict[str, Any]] = Field(
+    data_source_schema: Optional[Union[str, Dict[str, Any]]] = Field(
         None, description="Schema of the data source"
     )
 

@@ -93,11 +93,12 @@ def get_chat_service(
 def get_message_service(
     message_repo: MessageRepository = Depends(get_message_repo),
     chat_repo: ChatRepository = Depends(get_chat_repo),
+    data_source_repo: DataSourceRepository = Depends(get_data_source_repo),
     llm_service: MockLLMService = Depends(get_llm_service),
     redis_factory: RedisServiceFactory = Depends(get_redis_factory_service),
 ) -> MessageService:
     """Dependency to get MessageService instance"""
-    return MessageService(message_repo, chat_repo, llm_service, redis_factory)
+    return MessageService(message_repo, chat_repo, data_source_repo, llm_service, redis_factory)
 
 
 

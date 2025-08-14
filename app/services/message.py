@@ -3,11 +3,12 @@ from typing import Optional, List, Dict, Any, Tuple
 from fastapi import HTTPException, status
 from app.repositories.message import MessageRepository
 from app.repositories.chat import ChatRepository
+from app.repositories.data_source import DataSourceRepository
 from app.services.ai_service import AIQuery
 from app.services.mock_llm import MockLLMService
 from app.schemas.chat import ChatMessageRequest, MessageRole
 from .redis_managers.factory import RedisServiceFactory
-from app.core.utils import logger
+from app.core.utils import logger, make_json_serializable
 from app.config.settings import get_settings
 
 
@@ -21,11 +22,13 @@ class MessageService:
         self,
         message_repo: MessageRepository,
         chat_repo: ChatRepository,
+        data_source_repo: DataSourceRepository,
         llm_service: MockLLMService,
         redis_factory: RedisServiceFactory,
     ):
         self.message_repo = message_repo
         self.chat_repo = chat_repo
+        self.data_source_repo = data_source_repo
         self.redis_factory = redis_factory
         self.llm_service = llm_service
         self.chat_cache = redis_factory.chat_cache_service
@@ -90,6 +93,8 @@ class MessageService:
             ai_response = await self._generate_ai_response(
                 message_data.content, context_messages, session_info
             )
+
+            serializable_response = make_json_serializable(ai_response)
             
             logger.info("# 3.1 NEW: Check if AI response would exceed the limit")
             # 3.1 NEW: Check if AI response would exceed the limit
@@ -118,7 +123,7 @@ class MessageService:
                 session_id=session_id,
                 user_id=user_id,
                 role=MessageRole.ASSISTANT,
-                content=json.dumps(ai_response),
+                content=json.dumps(serializable_response),
                 token_count=ai_response_count,
                 message_index=next_index + 1,
                 parent_message_id=user_message['message_id']
@@ -186,12 +191,12 @@ class MessageService:
             context_messages, total_tokens, session_info = await self.chat_cache.get_session_data(session_id)
             
             if context_messages and session_info:
-                logger.debug(f"Cache hit for session {session_id}: {len(context_messages)} messages, "
+                logger.info(f"Cache hit for session {session_id}: {len(context_messages)} messages, "
                             f"{total_tokens} tokens")
                 return context_messages, total_tokens, session_info
             
             # Cache miss - load from database
-            logger.debug(f"Cache miss for session {session_id}, loading from database")
+            logger.info(f"Cache miss for session {session_id}, loading from database")
             
             # Get conversation context
             active_path = await self.message_repo.get_active_conversation_path(
@@ -233,9 +238,8 @@ class MessageService:
             # Get the potentially trimmed data
             final_context, final_tokens, _ = await self.chat_cache.get_session_data(session_id)
             
-            logger.debug(f"Loaded and cached session {session_id}: {len(final_context)} messages, "
+            logger.info(f"Loaded and cached session {session_id}: {len(final_context)} messages, "
                         f"{final_tokens} tokens")
-            
             return final_context, final_tokens, session_info
             
         except Exception as e:
@@ -264,11 +268,14 @@ class MessageService:
             memory = json.dumps(context_messages) # chat context (str)
 
             initial_response = agent.initial_processor(message, memory)
-            json_extractor = agent.agentic_call(initial_response, data_source_info)
-            final_response = agent.final_processor(message, json_extractor)
+            if initial_response[1]['requestType'] == "query_response":
+                json_extractor = agent.agentic_call(initial_response, data_source_info)
+                final_response = agent.final_processor(initial_response, json_extractor)
+            else:
+                final_response = agent.final_processor(initial_response, None)
 
             ai_response = {
-                "response_type": json_extractor[0],
+                "response_type": initial_response[1]['requestType'],
                 "response": final_response
             }
 

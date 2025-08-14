@@ -1,5 +1,6 @@
 from typing import Optional, List, Dict, Any, Tuple
 from fastapi import HTTPException, status
+from app.schemas.chat import MessageResponse, MessageRole
 from app.repositories.chat import ChatRepository
 from app.repositories.message import MessageRepository
 from app.repositories.data_source import DataSourceRepository

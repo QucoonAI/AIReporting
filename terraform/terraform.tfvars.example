@@ -1,5 +1,60 @@
-project_name       = ""
-environment        = "dev"
-aws_region         = ""
-lambda_timeout     = int
-lambda_memory_size = int
+# terraform.tfvars.example
+# Copy this file to terraform.tfvars and fill in your values
+
+# Project Configuration
+project_name = "pedigraph"
+environment  = "dev"  # dev, staging, or prod
+aws_region   = "us-east-1"
+
+# AWS Credentials (preferably use AWS CLI or environment variables instead)
+aws_account_id        = "123456789012"
+aws_access_key_id     = "AKIA..."
+aws_secret_access_key = "your-secret-key"
+
+# Network Configuration
+vpc_cidr             = "10.0.0.0/16"
+public_subnet_cidr   = "10.0.1.0/24"
+private_subnet_cidr  = "10.0.10.0/24"
+
+# Database Configuration
+rds_username = "dbadmin"
+rds_password = "YourSecurePassword123!"  # CHANGE THIS!
+
+# Lambda Configuration
+lambda_timeout       = 30
+lambda_memory_size   = 512
+use_container_image  = true
+ecr_image_uri       = ""  # Leave empty to use latest from ECR
+
+# Lambda Function URL
+enable_lambda_function_url       = true
+lambda_function_url_cors_origins = ["*"]  # Restrict for production
+lambda_function_url_cors_methods = ["*"]
+
+# API Gateway (optional)
+enable_api_gateway = false
+
+# Logging
+log_retention_days = 14  # Increase for production
+
+# Container Registry
+ecr_image_scan_on_push = true
+
+# Storage Configuration
+dynamodb_point_in_time_recovery = true
+s3_versioning_enabled           = true
+s3_cors_allowed_origins         = ["*"]  # Restrict for production
+
+# Application Environment Variables
+secret_key        = "your-super-secret-application-key"
+database_url      = ""  # Leave empty to auto-generate from RDS
+redis_url         = "redis://your-redis-instance:6379"
+sendgrid_auth_key = "SG.your-sendgrid-api-key"
+
+# Environment-specific Overrides
+# For production, consider:
+# - Smaller log retention: log_retention_days = 90
+# - Enable deletion protection: (handled automatically based on environment)
+# - Restrict CORS origins
+# - Use secrets manager for sensitive values
+# - Enable enhanced monitoring for RDS

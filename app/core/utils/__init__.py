@@ -20,6 +20,19 @@ dynamodb_client = boto3.client('dynamodb', region_name=settings.REGION)
 bedrock = boto3.client(service_name="bedrock-runtime", region_name="us-east-1")
 
 
+def make_json_serializable(obj):
+    """Convert pandas objects to JSON serializable format"""
+    if hasattr(obj, 'to_dict'):  # DataFrame or Series
+        return obj.to_dict()
+    elif hasattr(obj, 'to_list'):  # Index or array-like
+        return obj.to_list()
+    elif isinstance(obj, dict):
+        return {k: make_json_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [make_json_serializable(item) for item in obj]
+    else:
+        return obj
+
 def read_from_sql_db(query: str, connection_string: str) -> pd.DataFrame:
     """
     Connects to a SQL database (e.g., MySQL, PostgreSQL) and executes a SELECT query.

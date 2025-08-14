@@ -73,10 +73,10 @@ tool_list = [
                         },
                         "queryType": {
                             "type": "string",
-                            "description": "The type of data source query to be executed. Python is used for CSV and Excel files, while SQL is used for databases like PostgreSQL, MySQL. While for MongoDB, it uses a MongoDB query.",
+                            "description": "The type of data source query to be executed. Python is used for CSV and Excel files, while SQL is used for MySQL databases, PostgreSQL is used for PostgreSQL databases. While for MongoDB, it uses a MongoDB query.",
                             "maxLength": 1000,
                             "nullable": False,
-                            "enum": ["python", "sql", "mongodb"],
+                            "enum": ["python", "sql", "mongodb", "postgresql"],
                         },
                         "query": {
                             "type": "string",
@@ -221,13 +221,13 @@ class AIQuery:
             exception = True
             return exception, str(e)
 
-    def extract_json(self, context, schema):  # Added 'self' parameter
+    def extract_json(self, context, schema, schema_type):  # Added 'self' parameter
         try:
             message = {
                 "role": "user",
                 "content": [
                     {
-                        "text": f"<context>{context}</context> \n. Please use the appropriate tool to generate the right response based on the context. Use this {schema} to generate the perfect and accurate query."
+                        "text": f"<context>{context}</context> \n. Please use the appropriate tool to generate the right response based on the context. Use this {schema} to generate the perfect and accurate query. The type of database is: {schema_type}."  # Added schema_type
                     },
                     {
                         "text": "Do not generate a wrong query using a fictitious schema, if you can't find the required details for generating a query, use the generic_response tool to provide a response to the user's query."
@@ -321,10 +321,13 @@ class AIQuery:
             exception = True
             return exception, str(e)
     
-    def agentic_call(self, message, db_creds=None):
+    def agentic_call(self, message, db_creds):
         data_source_schema = db_creds["schema"]
+        data_source_type = db_creds["type"]
         data_source_url = db_creds["url"]
-        exception, agent_call = self.extract_json(message, data_source_schema)
+
+        exception, agent_call = self.extract_json(message, data_source_schema, data_source_type)
+
         agent_type = agent_call.get("requestType")
         
         if agent_type == "query_response":
@@ -338,9 +341,10 @@ class AIQuery:
                 query = agent_call.get("query")
                 query_result = read_from_mongo_db(query, data_source_url)
                 return query_result, query_type
-            elif data_source == "PostgreSQL" and query_type == "sql":
+            elif data_source == "PostgreSQL" and query_type == "postgresql":
                 query = agent_call.get("query")
                 query_result = read_from_sql_db(query, data_source_url)
+                print('ggg')
                 return query_result, query_type
         elif agent_type == "generic_response":
             query_type = agent_call.get("queryType", "text")
