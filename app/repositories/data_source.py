@@ -165,8 +165,8 @@ class DataSourceRepository:
             List of DataSource objects
         """
         try:
-            statement = select(DataSource).where(DataSource.data_source_user_id == user_id)
-            
+            statement = select(DataSource).where(DataSource.data_source_user_id == user_id, DataSource.data_source_is_active == True)
+
             if data_source_type:
                 statement = statement.where(DataSource.data_source_type == data_source_type)
                 
@@ -216,9 +216,9 @@ class DataSourceRepository:
             offset = (page - 1) * per_page
             
             # Build base query
-            base_statement = select(DataSource).where(DataSource.data_source_user_id == user_id)
+            base_statement = select(DataSource).where(DataSource.data_source_user_id == user_id, DataSource.data_source_is_active == True)
             count_statement = select(func.count(DataSource.data_source_id)).where(
-                DataSource.data_source_user_id == user_id
+                DataSource.data_source_user_id == user_id, DataSource.data_source_is_active == True
             )
             
             # Apply filters
@@ -301,9 +301,9 @@ class DataSourceRepository:
             offset = (page - 1) * per_page
             
             # Build base query
-            base_statement = select(DataSource)
-            count_statement = select(func.count(DataSource.data_source_id))
-            
+            base_statement = select(DataSource).where(DataSource.data_source_is_active == True)
+            count_statement = select(func.count(DataSource.data_source_id)).where(DataSource.data_source_is_active == True)
+
             # Apply filters
             filters = []
             

@@ -216,7 +216,7 @@ class MessageRepository:
             Number of messages deactivated
         """
         try:
-            messages = await self.get_session_messages(session_id)
+            messages = await self.get_session_messages_active(session_id)
             deactivated_count = 0
 
             # Find all messages that are descendants of the parent
@@ -260,7 +260,7 @@ class MessageRepository:
             Number of messages deleted
         """
         try:
-            messages = await self.get_session_messages(session_id)
+            messages = await self.get_session_messages_active(session_id)
             deleted_count = 0
 
             for message in messages:
@@ -357,7 +357,7 @@ class MessageRepository:
             Total token count for all messages
         """
         try:
-            all_messages = await self.get_session_messages(session_id)
+            all_messages = await self.get_session_messages_active(session_id)
             return sum(msg['token_count'] for msg in all_messages)
 
         except Exception as e:

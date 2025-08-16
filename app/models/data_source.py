@@ -2,16 +2,21 @@ from . import *
 from typing import Optional, Dict, Any
 from datetime import datetime
 from sqlmodel import SQLModel, Field, Relationship, JSON
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy import func, UniqueConstraint
+from sqlalchemy import func, UniqueConstraint, Index, Column
 from app.schemas.enum import DataSourceType
 
 
 class DataSource(SQLModel, table=True):
     __tablename__ = "DataSource"
     __table_args__ = (
-        UniqueConstraint('data_source_user_id', 'data_source_name', name='unique_user_data_source_name'),
-        UniqueConstraint("data_source_user_id", "data_source_url", name="unique_user_data_source_url"),
+        UniqueConstraint("data_source_user_id", "data_source_name", name="unique_user_data_source_name"),
+        Index(
+            "unique_user_active_data_source_url",
+            "data_source_user_id",
+            "data_source_url",
+            unique=True,
+            postgresql_where=Column("data_source_is_active") == True
+        ),
     )
 
     data_source_id: Optional[int] = Field(default=None, primary_key=True)
