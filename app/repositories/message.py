@@ -264,7 +264,8 @@ class MessageRepository:
             deleted_count = 0
 
             for message in messages:
-                sk = f"MSG#{message['message_index']:06d}#{message['message_id']}"
+                index = int(message['message_index'])
+                sk = f"MSG#{index:06d}#{message['message_id']}"
                 self.messages_table.delete_item(
                     Key={
                         'pk': f"SESSION#{session_id}",
@@ -278,6 +279,9 @@ class MessageRepository:
 
         except ClientError as e:
             logger.error(f"Error deleting session messages for session {session_id}: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Error deleting chat session messages : {e}")
             raise
     
     async def get_active_conversation_path(

@@ -320,7 +320,6 @@ class ChatService:
             
             # Then delete the session
             success = await self.chat_repo.delete_chat_session(user_id, session_id)
-            
             if not success:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
